@@ -1,0 +1,71 @@
+#!/bin/zsh
+# cgpus v1.0.0 (legacy)
+# Simple GPU availability checker
+# Repository: https://github.com/leonlufkin/cgpus
+#
+# Usage: cgpus0 GROUP
+# Example: cgpus zyphra
+
+if [[ "$#" -ne 1 ]]; then
+  echo "Usage: cgpus GROUP"
+  exit 1
+fi
+
+GROUP="$1"
+
+# Declare an associative array in zsh
+source "${HOME}/.ssh/ssh_key_groups.sh"
+
+if [[ -z "${GROUPS[$GROUP]}" ]]; then
+  echo "Group '$GROUP' is not defined."
+  exit 1
+fi
+
+# Convert the string to an array by splitting on whitespace.
+nodes=(${(s: :)GROUPS[$GROUP]})
+
+# Create a temporary directory to hold the results.
+tmp_dir=$(mktemp -d -t check_gpus_results)
+
+# Set the threshold in MB: GPUs using less than this memory are considered available.
+THRESHOLD=50
+
+# Launch asynchronous SSH commands and store each result in a temporary file.
+for host in $nodes; do
+  (
+    result=$(ssh -o BatchMode=yes -o ConnectTimeout=5 "$host" \
+      'command -v nvidia-smi >/dev/null 2>&1 && total=$(nvidia-smi -L | wc -l) && available=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits | awk '\''BEGIN{count=0} {if($1 < '"$THRESHOLD"') count++} END{print count}'\'') && echo "${available:-0}/${total} GPUs available" || echo "nvidia-smi not found"' 2>/dev/null)
+    if [[ $? -ne 0 ]]; then
+      echo "Unable to connect or execute command on $host." > "$tmp_dir/$host"
+    else
+      echo "$result" > "$tmp_dir/$host"
+    fi
+  ) &
+done
+
+# Wait for all background tasks to complete.
+wait
+
+# ANSI escape sequences for red text and reset.
+RED='\033[31m'
+RESET='\033[0m'
+
+# Print the results in the original order, one line per node.
+for host in $nodes; do
+  result=$(<"$tmp_dir/$host")
+  # If result is in the form "available/total GPUs available", extract available.
+  if [[ "$result" == *"/"* ]]; then
+    available=${result%%/*}
+    # If available is nonzero, print the line in red.
+    if [[ "$available" =~ ^[0-9]+$ ]] && (( available > 0 )); then
+      printf "%s: %b%s%b\n" "$host" "$RED" "$result" "$RESET"
+    else
+      echo "$host: $result"
+    fi
+  else
+    echo "$host: $result"
+  fi
+done
+
+# Clean up the temporary directory.
+rm -r "$tmp_dir"
