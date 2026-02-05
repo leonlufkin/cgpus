@@ -5,19 +5,19 @@ Monitor NVIDIA GPU availability, utilization, and performance across multiple re
 ## Features
 
 ### cgpus (v2.0) - Enhanced Version
-- 📊 **Advanced Metrics**: GPU utilization, power draw, memory per GPU
-- 🔄 **Refresh Mode**: Continuous monitoring with configurable intervals
-- 💻 **CPU Monitoring**: Optional CPU utilization and host memory stats
-- 📈 **Sparkline History**: Visual power consumption history with color coding
-- 🎨 **Smart Coloring**: Red (idle GPUs), Yellow (underutilized), White (busy)
-- 📏 **Dynamic Layout**: Auto-adjusting column widths based on data
-- 🔍 **Smart Detection**: Multi-factor idle GPU detection
+- **Advanced Metrics**: GPU utilization, power draw, memory per GPU
+- **Refresh Mode**: Continuous monitoring with configurable intervals
+- **CPU Monitoring**: Optional CPU utilization and host memory stats
+- **Sparkline History**: Visual power consumption history with color coding
+- **Smart Coloring**: Red (idle GPUs), Yellow (underutilized), White (busy)
+- **Dynamic Layout**: Auto-adjusting column widths based on data
+- **Smart Detection**: Multi-factor idle GPU detection
 
 ### cgpus0 (v1.0) - Legacy Version
-- ✅ **Simple & Fast**: Basic GPU availability checking
-- 🎯 **Lightweight**: ~70 lines of code
-- 🔴 **Color Output**: Red for available GPUs
-- 📋 **One-shot**: Quick checks without continuous monitoring
+- **Simple & Fast**: Basic GPU availability checking
+- **Lightweight**: ~70 lines of code
+- **Color Output**: Red for available GPUs
+- **One-shot**: Quick checks without continuous monitoring
 
 ## Installation
 
@@ -115,41 +115,18 @@ gpu-node-3: 4/8 GPUs available
 
 | Feature | cgpus0 (v1.0) | cgpus (v2.0) |
 |---------|---------------|--------------|
-| GPU Availability | ✅ | ✅ |
-| Power Draw | ❌ | ✅ |
-| GPU Utilization | ❌ | ✅ |
-| Memory per GPU | ❌ | ✅ |
-| CPU Monitoring | ❌ | ✅ (--cpu) |
-| Host Memory | ❌ | ✅ (--cpu) |
-| Refresh Mode | ❌ | ✅ (-f) |
-| Sparkline History | ❌ | ✅ |
-| Color-coded History | ❌ | ✅ |
-| Dynamic Layout | ❌ | ✅ |
+| GPU Availability | Yes | Yes |
+| Power Draw | No | Yes |
+| GPU Utilization | No | Yes |
+| Memory per GPU | No | Yes |
+| CPU Monitoring | No | Yes (--cpu) |
+| Host Memory | No | Yes (--cpu) |
+| Refresh Mode | No | Yes (-f) |
+| Sparkline History | No | Yes |
+| Color-coded History | No | Yes |
+| Dynamic Layout | No | Yes |
 | Lines of Code | ~70 | ~550 |
-
-## Which Version Should I Use?
-
-**Use cgpus (v2.0) if you:**
-- Need detailed GPU metrics
-- Want continuous monitoring
-- Need CPU/memory stats
-- Want visual history
-- Don't mind extra dependencies
-
-**Use cgpus0 (v1.0) if you:**
-- Just need quick availability checks
-- Want minimal dependencies
-- Prefer simplicity
-- Have resource constraints
 
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Contributions welcome! Open an issue or submit a pull request.
-
-## Acknowledgments
-
-Built for monitoring GPU clusters via SSH.
