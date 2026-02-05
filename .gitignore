@@ -1,0 +1,7 @@
+# Temporary files
+*.tmp
+*.swp
+.DS_Store
+
+# Local configuration (users should copy from example)
+ssh_key_groups.sh

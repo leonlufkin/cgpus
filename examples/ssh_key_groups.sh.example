@@ -1,0 +1,11 @@
+#!/bin/zsh
+# Example configuration for cgpus
+# Copy to ~/.ssh/ssh_key_groups.sh and customize
+
+typeset -A GROUPS=(
+  # Example GPU cluster
+  my-cluster   "gpu-node-1 gpu-node-2 gpu-node-3 gpu-node-4"
+
+  # Another group
+  test-nodes   "test-gpu-1 test-gpu-2"
+)
