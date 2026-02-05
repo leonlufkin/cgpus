@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Added
+- TODO.md documenting planned improvements and feature ideas
+- Contributing section in README.md linking to TODO.md
+
 ## [2.0.0] - 2026-02-05
 
 ### Added

@@ -127,6 +127,10 @@ gpu-node-3: 4/8 GPUs available
 | Dynamic Layout | No | Yes |
 | Lines of Code | ~70 | ~550 |
 
+## Contributing
+
+Contributions are welcome! See [TODO.md](TODO.md) for planned improvements and feature ideas.
+
 ## License
 
 MIT License - see [LICENSE](LICENSE) file for details.
