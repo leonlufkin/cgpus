@@ -17,6 +17,7 @@ All notable changes to this project will be documented in this file.
   - Tags persist until replaced by a new tag (idle GPUs show last tag)
   - Tags cleared when processes are mixed (multiple different tags)
   - Tags only applied when ALL processes match exactly one criterion
+  - Tag count summary displayed at bottom (only counts current tags, not persisting)
 
 ## [2.0.0] - 2026-02-05
 

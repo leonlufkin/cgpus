@@ -149,6 +149,9 @@ check_gpus() {
   local max_history="${3:-20}"  # Max history size, default 20
   local enable_cpu="${4:-0}"  # 1 = show CPU stats, 0 = don't show
 
+  # Track current tags (not persisting) for summary
+  typeset -A TAG_COUNTS
+
   # Validate group exists
   if [[ -z "${GROUPS[$GROUP]}" ]]; then
     echo "Group '$GROUP' is not defined."
@@ -450,17 +453,19 @@ check_gpus() {
       fi
       available=${avail_info%%/*}
 
-      # Apply tag persistence logic
+      # Apply tag persistence logic and track current tags
+      local original_tag="$process_tag"
       if [[ "$process_tag" == "MIXED" || "$process_tag" == "NONE" ]]; then
         # Conflict or unmatched processes - clear last tag and show nothing
         LAST_TAG[$host]=""
         process_tag=""
       elif [[ -z "$process_tag" ]]; then
-        # No processes - use last tag if available
+        # No processes - use last tag if available (persisting, don't count)
         process_tag="${LAST_TAG[$host]:-}"
       else
-        # Specific tag determined - update last tag
+        # Specific tag determined - update last tag and count it
         LAST_TAG[$host]="$process_tag"
+        TAG_COUNTS[$process_tag]=$((${TAG_COUNTS[$process_tag]:-0} + 1))
       fi
 
       # Add process tag if applicable (with space before tag)
@@ -568,6 +573,27 @@ check_gpus() {
       printf "%-6s %s\n" "$host:" "$output"
     fi
   done
+
+  # Print tag summary (only current tags, not persisting)
+  local tag_list=("*" "RL" "CM" "AU" "DA" "AR")
+  local has_tags=0
+  for tag in $tag_list; do
+    if [[ -n "${TAG_COUNTS[$tag]:-}" && ${TAG_COUNTS[$tag]} -gt 0 ]]; then
+      has_tags=1
+      break
+    fi
+  done
+
+  if [[ $has_tags -eq 1 ]]; then
+    printf "\nTags: "
+    for tag in $tag_list; do
+      local count=${TAG_COUNTS[$tag]:-0}
+      if [[ $count -gt 0 ]]; then
+        printf "%s:%d  " "$tag" "$count"
+      fi
+    done
+    printf "\n"
+  fi
 
   # Clean up the temporary directory.
   rm -r "$tmp_dir"
