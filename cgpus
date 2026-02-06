@@ -566,6 +566,16 @@ check_gpus() {
         avail_info="${avail_info} ${process_tag}"
       fi
 
+      # Determine row color early so we can use it for closing paren
+      local row_color=""
+      if [[ -n "$idle_gpus" ]]; then
+        # Red: at least one GPU is idle
+        row_color="$RED"
+      elif [[ -n "$yellow_gpus" ]]; then
+        # Yellow: at least one GPU meets yellow condition (and no idle GPUs)
+        row_color="$YELLOW"
+      fi
+
       # Format the output as columns (use fixed-width numeric formatting)
       formatted=$(printf "%-7s %4.0f%% %7.1fW  %5.1f/%2.0f GB" "$avail_info" "$util" "$power" "$mem_used" "$mem_total")
 
@@ -659,29 +669,23 @@ check_gpus() {
           done
         done
 
-        gpu_section="(${output}"
-        # Closing paren will be added later with row color
+        # Add closing paren with row color
+        if [[ -n "$row_color" ]]; then
+          gpu_section="(${output}${row_color})${RESET}"
+        else
+          gpu_section="(${output})"
+        fi
       fi
 
       # Calculate visible length (excluding ANSI escape codes) and pad manually
-      # Add 1 for closing paren in length calculation
       local visible_section="$gpu_section"
-      if [[ -n "$gpu_section" ]]; then
-        visible_section="${visible_section})"
-      fi
       # Remove ANSI escape codes for length calculation
       visible_section=$(echo "$visible_section" | sed 's/\x1b\[[0-9;]*m//g')
       local visible_len=${#visible_section}
       local padding=$((max_gpu_id_len - visible_len))
       [[ $padding -lt 0 ]] && padding=0
 
-      # Track whether we have GPU section for closing paren
-      local has_gpu_section=0
-      if [[ -n "$gpu_section" ]]; then
-        has_gpu_section=1
-      fi
-
-      # Append gpu_section (without closing paren yet) with manual padding
+      # Append gpu_section with padding after it
       formatted="$formatted  ${gpu_section}$(printf "%${padding}s" "")"
 
       # Add CPU stats if in CPU mode
@@ -690,18 +694,7 @@ check_gpus() {
         cpu_stats="  $(printf '%3s%%' "$cpu_pct")  ${host_mem_used_tb}/${host_mem_total_tb} TB"
       fi
 
-      # Determine row color based on current state: red for any idle GPUs, yellow for yellow GPUs (if no idle)
-      local row_color=""
-      if [[ "$available" =~ ^[0-9]+$ ]] && (( available > 0 )); then
-        # Red: at least one GPU is idle (strict condition)
-        row_color="$RED"
-      elif [[ -n "$yellow_gpus" ]]; then
-        # Yellow: at least one GPU meets yellow condition (and no idle GPUs)
-        row_color="$YELLOW"
-      fi
-      # Otherwise, row_color remains empty (white/default)
-
-      # Store formatted string without sparkline
+      # Store formatted string without sparkline (row_color already determined earlier)
       local formatted_base="$formatted"
       local sparkline_str=""
 
@@ -746,19 +739,10 @@ check_gpus() {
       fi
 
       # Print: apply row color only to base, sparkline has its own colors
-      # Add closing paren with row color if GPU section exists
       if [[ -n "$row_color" ]]; then
-        if [[ $has_gpu_section -eq 1 ]]; then
-          printf "%-6s %b%b)%b%s%s\n" "$host:" "$row_color" "$formatted_base" "$RESET" "$cpu_stats" "$sparkline_str"
-        else
-          printf "%-6s %b%b%b%s%s\n" "$host:" "$row_color" "$formatted_base" "$RESET" "$cpu_stats" "$sparkline_str"
-        fi
+        printf "%-6s %b%b%b%s%s\n" "$host:" "$row_color" "$formatted_base" "$RESET" "$cpu_stats" "$sparkline_str"
       else
-        if [[ $has_gpu_section -eq 1 ]]; then
-          printf "%-6s %b)%s%s\n" "$host:" "$formatted_base" "$cpu_stats" "$sparkline_str"
-        else
-          printf "%-6s %b%s%s\n" "$host:" "$formatted_base" "$cpu_stats" "$sparkline_str"
-        fi
+        printf "%-6s %b%s%s\n" "$host:" "$formatted_base" "$cpu_stats" "$sparkline_str"
       fi
     else
       # Handle error messages or non-standard output
