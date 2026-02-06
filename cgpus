@@ -238,8 +238,8 @@ check_gpus() {
             total_mem_used += mem_used
             total_mem_total += mem_total
 
-            # GPU is idle if: power < 100W AND memory < 1GB AND util < 5%
-            if (power < 100 && mem_used < 1024 && util < 5) {
+            # GPU is idle if: power < 70W AND memory < 1GB AND util < 5%
+            if (power < 70 && mem_used < 1024 && util < 5) {
               idle_count++
               idle[gpu_index] = 1
             } else {
