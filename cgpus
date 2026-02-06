@@ -311,13 +311,14 @@ check_gpus() {
               pid=$(echo "$pid" | tr -d '\'' '\'' '')
               # Don'\''t trim proc_name to preserve full name
 
-              # Get owner
+              # Get owner and full command line
               owner=$(ps -o user= -p "$pid" 2>/dev/null | tr -d '\'' '\'' '')
+              cmd_line=$(ps -o args= -p "$pid" 2>/dev/null)
 
               # Check conditions - set to 0 if ANY process fails the check
               [[ "$owner" != "leon" ]] && check_leon=0
               [[ "$proc_name" != *"ray::WorkerDict"* ]] && check_ray=0
-              [[ "$proc_name" != *"cmoe"* ]] && check_cmoe=0
+              [[ "$cmd_line" != *"cmoe"* ]] && check_cmoe=0
             done < /tmp/gpu_procs_$$
 
             rm -f /tmp/gpu_procs_$$
