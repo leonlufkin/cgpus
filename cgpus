@@ -586,8 +586,16 @@ check_gpus() {
         gpu_section="($output)"
       fi
 
-      # Use calculated max_gpu_id_len for padding
-      formatted="$formatted  $(printf "%-${max_gpu_id_len}s" "$gpu_section")"
+      # Calculate visible length (excluding ANSI escape codes) and pad manually
+      local visible_section="$gpu_section"
+      # Remove ANSI escape codes for length calculation
+      visible_section=$(echo "$gpu_section" | sed 's/\x1b\[[0-9;]*m//g')
+      local visible_len=${#visible_section}
+      local padding=$((max_gpu_id_len - visible_len))
+      [[ $padding -lt 0 ]] && padding=0
+
+      # Append gpu_section with manual padding
+      formatted="$formatted  ${gpu_section}$(printf "%${padding}s" "")"
 
       # Add CPU stats if in CPU mode
       if [[ $enable_cpu -eq 1 ]]; then
