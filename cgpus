@@ -326,7 +326,7 @@ check_gpus() {
               [[ "$owner" != "leon" ]] && check_leon=0
               [[ "$proc_name" != *"ray::WorkerDict"* ]] && check_ray=0
               [[ "$cmd_line" != *"cmoe"* ]] && check_cmoe=0
-              [[ "$cmd_line" != *"lisan.al_gaib"* ]] && check_au=0
+              [[ "$cmd_line" != *"lisan.al_gaib"* && "$cmd_line" != *"zonos"* ]] && check_au=0
             done < /tmp/gpu_procs_$$
 
             rm -f /tmp/gpu_procs_$$
