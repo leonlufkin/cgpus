@@ -306,6 +306,7 @@ check_gpus() {
             check_ray=1
             check_cmoe=1
             check_au=1
+            check_da=1
             num_processes=0
 
             # Store process data in a temp file to avoid subshell issues
@@ -324,9 +325,10 @@ check_gpus() {
 
               # Check conditions - set to 0 if ANY process fails the check
               [[ "$owner" != "leon" ]] && check_leon=0
-              [[ "$proc_name" != *"ray::WorkerDict"* ]] && check_ray=0
+              [[ "$proc_name" != *"ray::WorkerDict"* && "$owner" != "pritish" ]] && check_ray=0
               [[ "$cmd_line" != *"cmoe"* ]] && check_cmoe=0
               [[ "$cmd_line" != *"lisan.al_gaib"* && "$cmd_line" != *"zonos"* ]] && check_au=0
+              [[ "$owner" != "xiao" && "$cmd_line" != *"dataInfra"* ]] && check_da=0
             done < /tmp/gpu_procs_$$
 
             rm -f /tmp/gpu_procs_$$
@@ -336,7 +338,7 @@ check_gpus() {
               process_tag=""
             else
               # Count how many conditions passed for ALL processes
-              tag_count=$((check_leon + check_ray + check_cmoe + check_au))
+              tag_count=$((check_leon + check_ray + check_cmoe + check_au + check_da))
 
               # Only set tag if exactly one condition is true for ALL processes
               if [[ $tag_count -eq 1 ]]; then
@@ -344,6 +346,7 @@ check_gpus() {
                 [[ $check_ray -eq 1 ]] && process_tag="RL"
                 [[ $check_cmoe -eq 1 ]] && process_tag="CM"
                 [[ $check_au -eq 1 ]] && process_tag="AU"
+                [[ $check_da -eq 1 ]] && process_tag="DA"
               elif [[ $tag_count -gt 1 ]]; then
                 # Multiple tags match all processes - this is a conflict
                 process_tag="MIXED"
