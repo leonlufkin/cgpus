@@ -18,6 +18,8 @@ All notable changes to this project will be documented in this file.
   - Tags cleared when processes are mixed (multiple different tags)
   - Tags only applied when ALL processes match exactly one criterion
   - Tag count summary displayed at bottom (only counts current tags, not persisting)
+  - Individual GPU IDs in parentheses now colored by status (red for idle, yellow for underutilized)
+  - Entire row still colored based on worst status (red if any idle, yellow if only underutilized)
 
 ## [2.0.0] - 2026-02-05
 

@@ -228,7 +228,8 @@ check_gpus() {
             util=$4
             power=$5
 
-            # Store yellow status for each GPU
+            # Store idle and yellow status for each GPU
+            idle[gpu_index] = 0
             yellow[gpu_index] = 0
 
             # Accumulate stats for ALL GPUs
@@ -240,14 +241,17 @@ check_gpus() {
             # GPU is idle if: power < 100W AND memory < 1GB AND util < 5%
             if (power < 100 && mem_used < 1024 && util < 5) {
               idle_count++
+              idle[gpu_index] = 1
             } else {
               busy_count++
             }
 
-            # Check yellow condition for this individual GPU
-            spare_mem_gpu = (mem_total - mem_used) / 1024
-            if (spare_mem_gpu > 40 || power < 250) {
-              yellow[gpu_index] = 1
+            # Check yellow condition for this individual GPU (only if not idle)
+            if (idle[gpu_index] == 0) {
+              spare_mem_gpu = (mem_total - mem_used) / 1024
+              if (spare_mem_gpu > 40 || power < 250) {
+                yellow[gpu_index] = 1
+              }
             }
           }
           END {
@@ -257,6 +261,40 @@ check_gpus() {
               avg_power = total_power / gpu_count
               mem_used_gb = (total_mem_used / 1024) / gpu_count
               mem_total_gb = (total_mem_total / 1024) / gpu_count
+
+              # Build idle GPU list with range collapsing
+              idle_str = ""
+              range_start = -1
+              range_end = -1
+              for (i = 0; i < gpu_count; i++) {
+                if (idle[i] == 1) {
+                  if (range_start == -1) {
+                    range_start = i
+                    range_end = i
+                  } else if (i == range_end + 1) {
+                    range_end = i
+                  } else {
+                    # End previous range and start new one
+                    if (idle_str != "") idle_str = idle_str ","
+                    if (range_start == range_end) {
+                      idle_str = idle_str range_start
+                    } else {
+                      idle_str = idle_str range_start "-" range_end
+                    }
+                    range_start = i
+                    range_end = i
+                  }
+                }
+              }
+              # Flush final range
+              if (range_start != -1) {
+                if (idle_str != "") idle_str = idle_str ","
+                if (range_start == range_end) {
+                  idle_str = idle_str range_start
+                } else {
+                  idle_str = idle_str range_start "-" range_end
+                }
+              }
 
               # Build yellow GPU list with range collapsing
               yellow_str = ""
@@ -292,7 +330,7 @@ check_gpus() {
                 }
               }
 
-              printf "%d/%d|%.0f|%.1f|%.1f|%.0f|%s", idle_count, gpu_count, avg_util, avg_power, mem_used_gb, mem_total_gb, yellow_str
+              printf "%d/%d|%.0f|%.1f|%.1f|%.0f|%s|%s", idle_count, gpu_count, avg_util, avg_power, mem_used_gb, mem_total_gb, idle_str, yellow_str
             }
           }'\'')
 
@@ -394,18 +432,20 @@ check_gpus() {
     fi
 
     if [[ "$result" == *"|"* ]]; then
-      # Parse to get yellow_gpus field
+      # Parse to get idle_gpus and yellow_gpus fields
+      local idle_gpus_field=""
       local yellow_gpus_field=""
       if [[ $enable_cpu -eq 1 ]]; then
-        IFS='|' read -r _ _ _ _ _ yellow_gpus_field _ _ _ _ <<< "$result"
+        IFS='|' read -r _ _ _ _ _ idle_gpus_field yellow_gpus_field _ _ _ _ <<< "$result"
       else
-        IFS='|' read -r _ _ _ _ _ yellow_gpus_field _ <<< "$result"
+        IFS='|' read -r _ _ _ _ _ idle_gpus_field yellow_gpus_field _ <<< "$result"
       fi
 
-      if [[ -n "$yellow_gpus_field" ]]; then
-        local yellow_section_len=$((${#yellow_gpus_field} + 2))  # +2 for parentheses
-        if [[ $yellow_section_len -gt $max_gpu_id_len ]]; then
-          max_gpu_id_len=$yellow_section_len
+      # Calculate combined length (approximate, will be close enough for padding)
+      if [[ -n "$idle_gpus_field" || -n "$yellow_gpus_field" ]]; then
+        local combined_len=$((${#idle_gpus_field} + ${#yellow_gpus_field} + 3))  # +2 for parentheses, +1 for comma
+        if [[ $combined_len -gt $max_gpu_id_len ]]; then
+          max_gpu_id_len=$combined_len
         fi
       fi
     fi
@@ -445,11 +485,11 @@ check_gpus() {
 
     # If result contains pipe-delimited stats, parse and format
     if [[ "$result" == *"|"* ]]; then
-      # Parse the pipe-delimited format: available/total|util|power|mem_used_gb|mem_total_gb|yellow_gpu_ids|process_tag[|cpu_pct|host_mem_used_tb|host_mem_total_tb]
+      # Parse the pipe-delimited format: available/total|util|power|mem_used_gb|mem_total_gb|idle_gpu_ids|yellow_gpu_ids|process_tag[|cpu_pct|host_mem_used_tb|host_mem_total_tb]
       if [[ $enable_cpu -eq 1 ]]; then
-        IFS='|' read -r avail_info util power mem_used mem_total yellow_gpus process_tag cpu_pct host_mem_used_tb host_mem_total_tb <<< "$result"
+        IFS='|' read -r avail_info util power mem_used mem_total idle_gpus yellow_gpus process_tag cpu_pct host_mem_used_tb host_mem_total_tb <<< "$result"
       else
-        IFS='|' read -r avail_info util power mem_used mem_total yellow_gpus process_tag <<< "$result"
+        IFS='|' read -r avail_info util power mem_used mem_total idle_gpus yellow_gpus process_tag <<< "$result"
       fi
       available=${avail_info%%/*}
 
@@ -476,14 +516,78 @@ check_gpus() {
       # Format the output as columns (use fixed-width numeric formatting)
       formatted=$(printf "%-7s %4.0f%% %7.1fW  %5.1f/%2.0f GB" "$avail_info" "$util" "$power" "$mem_used" "$mem_total")
 
-      # Add yellow GPU IDs in parens if any exist, with dynamic padding for alignment
-      local yellow_section=""
-      if [[ -n "$yellow_gpus" ]]; then
-        yellow_section="($yellow_gpus)"
+      # Merge and color idle (red) and yellow GPU IDs with dynamic padding for alignment
+      local gpu_section=""
+      if [[ -n "$idle_gpus" || -n "$yellow_gpus" ]]; then
+        # Parse and track GPU colors (idle=R, yellow=Y)
+        local -A gpu_colors
+
+        # Parse idle GPUs (red) - these take priority
+        for range in ${(s:,:)idle_gpus}; do
+          if [[ "$range" == *-* ]]; then
+            local start=${range%%-*}
+            local end=${range##*-}
+            for ((i=start; i<=end; i++)); do
+              gpu_colors[$i]="R"
+            done
+          elif [[ -n "$range" ]]; then
+            gpu_colors[$range]="R"
+          fi
+        done
+
+        # Parse yellow GPUs (only if not already red)
+        for range in ${(s:,:)yellow_gpus}; do
+          if [[ "$range" == *-* ]]; then
+            local start=${range%%-*}
+            local end=${range##*-}
+            for ((i=start; i<=end; i++)); do
+              [[ -z "${gpu_colors[$i]:-}" ]] && gpu_colors[$i]="Y"
+            done
+          elif [[ -n "$range" ]]; then
+            [[ -z "${gpu_colors[$range]:-}" ]] && gpu_colors[$range]="Y"
+          fi
+        done
+
+        # Build colored output with range collapsing by color
+        local sorted_ids=(${(on)${(k)gpu_colors}})
+        local output=""
+        local i=1
+        while [[ $i -le ${#sorted_ids[@]} ]]; do
+          local start=${sorted_ids[$i]}
+          local color=${gpu_colors[$start]}
+          local end=$start
+
+          # Find consecutive GPUs with same color
+          while [[ $((i+1)) -le ${#sorted_ids[@]} ]]; do
+            local next=${sorted_ids[$((i+1))]}
+            if [[ $((end+1)) -eq $next && ${gpu_colors[$next]} == $color ]]; then
+              end=$next
+              i=$((i+1))
+            else
+              break
+            fi
+          done
+
+          # Add to output with color
+          [[ -n "$output" ]] && output="$output,"
+
+          local color_code=""
+          [[ $color == "R" ]] && color_code="$RED" || color_code="$YELLOW"
+
+          if [[ $start -eq $end ]]; then
+            output="$output${color_code}$start${RESET}"
+          else
+            output="$output${color_code}$start-$end${RESET}"
+          fi
+
+          i=$((i+1))
+        done
+
+        gpu_section="($output)"
       fi
 
       # Use calculated max_gpu_id_len for padding
-      formatted="$formatted  $(printf "%-${max_gpu_id_len}s" "$yellow_section")"
+      formatted="$formatted  $(printf "%-${max_gpu_id_len}s" "$gpu_section")"
 
       # Add CPU stats if in CPU mode
       if [[ $enable_cpu -eq 1 ]]; then
