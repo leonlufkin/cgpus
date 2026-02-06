@@ -246,11 +246,13 @@ check_gpus() {
               busy_count++
             }
 
-            # Check yellow condition for this individual GPU
-            # (checked independently - idle takes precedence in display)
-            spare_mem_gpu = (mem_total - mem_used) / 1024
-            if (spare_mem_gpu > 40 || power < 250) {
-              yellow[gpu_index] = 1
+            # Check yellow condition for non-idle GPUs only
+            # A GPU cannot be both idle and yellow
+            if (idle[gpu_index] == 0) {
+              spare_mem_gpu = (mem_total - mem_used) / 1024
+              if (spare_mem_gpu > 40 || power < 250) {
+                yellow[gpu_index] = 1
+              }
             }
           }
           END {
