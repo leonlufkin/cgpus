@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file.
   - Tag `CM` when all GPU processes contain "cmoe" in command line
   - Tag `AU` when all GPU processes contain "lisan.al_gaib" or "zonos" in command line
   - Tag `DA` when all GPU processes are owned by "xiao" OR contain "dataInfra" in command line
+  - Tag `AR` when all GPU processes contain "pretrain_gpt" in command line
   - Tags persist until replaced by a new tag (idle GPUs show last tag)
   - Tags cleared when processes are mixed (multiple different tags)
   - Tags only applied when ALL processes match exactly one criterion
