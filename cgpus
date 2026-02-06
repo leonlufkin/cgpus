@@ -659,9 +659,9 @@ check_gpus() {
 
       # Print: apply row color only to base, sparkline has its own colors
       if [[ -n "$row_color" ]]; then
-        printf "%-6s %b%s%b%s\n" "$host:" "$row_color" "$formatted_base" "$RESET" "$sparkline_str"
+        printf "%-6s %b%b%b%s\n" "$host:" "$row_color" "$formatted_base" "$RESET" "$sparkline_str"
       else
-        printf "%-6s %s%s\n" "$host:" "$formatted_base" "$sparkline_str"
+        printf "%-6s %b%s\n" "$host:" "$formatted_base" "$sparkline_str"
       fi
     else
       # Handle error messages or non-standard output
