@@ -290,23 +290,53 @@ check_gpus() {
             }
           }'\'')
 
-          # Check if any GPU process is owned by leon
-          leon_flag=""
-          pids=$(nvidia-smi --query-compute-apps=pid --format=csv,noheader,nounits 2>/dev/null)
-          if [[ -n "$pids" ]]; then
-            for pid in $pids; do
-              owner=$(ps -o user= -p $pid 2>/dev/null | tr -d " ")
-              if [[ "$owner" == "leon" ]]; then
-                leon_flag="*"
-                break
-              fi
-            done
+          # Check process tags based on owner and name
+          # Tags are applied only if ALL processes on GPUs match exactly one criterion
+          process_tag=""
+
+          # Get all process data at once
+          process_data=$(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader,nounits 2>/dev/null)
+
+          if [[ -n "$process_data" ]]; then
+            # Assume all conditions are true initially
+            check_leon=1
+            check_ray=1
+            check_cmoe=1
+
+            # Store process data in a temp file to avoid subshell issues
+            echo "$process_data" > /tmp/gpu_procs_$$
+
+            while IFS=, read -r pid proc_name; do
+              # Trim whitespace from pid
+              pid=$(echo "$pid" | tr -d '\'' '\'' '')
+              # Don'\''t trim proc_name to preserve full name
+
+              # Get owner
+              owner=$(ps -o user= -p "$pid" 2>/dev/null | tr -d '\'' '\'' '')
+
+              # Check conditions - set to 0 if ANY process fails the check
+              [[ "$owner" != "leon" ]] && check_leon=0
+              [[ "$proc_name" != *"ray::WorkerDict"* ]] && check_ray=0
+              [[ "$proc_name" != *"cmoe"* ]] && check_cmoe=0
+            done < /tmp/gpu_procs_$$
+
+            rm -f /tmp/gpu_procs_$$
+
+            # Count how many conditions passed for ALL processes
+            tag_count=$((check_leon + check_ray + check_cmoe))
+
+            # Only set tag if exactly one condition is true for ALL processes
+            if [[ $tag_count -eq 1 ]]; then
+              [[ $check_leon -eq 1 ]] && process_tag="*"
+              [[ $check_ray -eq 1 ]] && process_tag="RL"
+              [[ $check_cmoe -eq 1 ]] && process_tag="CM"
+            fi
           fi
 
           if [[ -n "$cpu_mem_stats" ]]; then
-            echo "${gpu_stats}|${leon_flag}|${cpu_mem_stats}"
+            echo "${gpu_stats}|${process_tag}|${cpu_mem_stats}"
           else
-            echo "${gpu_stats}|${leon_flag}"
+            echo "${gpu_stats}|${process_tag}"
           fi
         } || echo "-"' 2>/dev/null)
       if [[ $? -ne 0 ]] || [[ -z "$result" ]]; then
@@ -385,17 +415,17 @@ check_gpus() {
 
     # If result contains pipe-delimited stats, parse and format
     if [[ "$result" == *"|"* ]]; then
-      # Parse the pipe-delimited format: available/total|util|power|mem_used_gb|mem_total_gb|yellow_gpu_ids|leon_flag[|cpu_pct|host_mem_used_tb|host_mem_total_tb]
+      # Parse the pipe-delimited format: available/total|util|power|mem_used_gb|mem_total_gb|yellow_gpu_ids|process_tag[|cpu_pct|host_mem_used_tb|host_mem_total_tb]
       if [[ $enable_cpu -eq 1 ]]; then
-        IFS='|' read -r avail_info util power mem_used mem_total yellow_gpus leon_flag cpu_pct host_mem_used_tb host_mem_total_tb <<< "$result"
+        IFS='|' read -r avail_info util power mem_used mem_total yellow_gpus process_tag cpu_pct host_mem_used_tb host_mem_total_tb <<< "$result"
       else
-        IFS='|' read -r avail_info util power mem_used mem_total yellow_gpus leon_flag <<< "$result"
+        IFS='|' read -r avail_info util power mem_used mem_total yellow_gpus process_tag <<< "$result"
       fi
       available=${avail_info%%/*}
 
-      # Add asterisk if leon owns any processes
-      if [[ -n "$leon_flag" ]]; then
-        avail_info="${avail_info}*"
+      # Add process tag if applicable (with space before tag)
+      if [[ -n "$process_tag" ]]; then
+        avail_info="${avail_info} ${process_tag}"
       fi
 
       # Format the output as columns (use fixed-width numeric formatting)

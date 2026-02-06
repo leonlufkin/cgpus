@@ -7,6 +7,11 @@ All notable changes to this project will be documented in this file.
 ### Added
 - TODO.md documenting planned improvements and feature ideas
 - Contributing section in README.md linking to TODO.md
+- General process tagging system with configurable rules based on owner and process name
+  - Tag `*` when all GPU processes are owned by "leon"
+  - Tag `RL` when all GPU processes contain "ray::WorkerDict"
+  - Tag `CM` when all GPU processes contain "cmoe"
+  - Tags only applied when ALL processes match exactly one criterion (no conflicts)
 
 ## [2.0.0] - 2026-02-05
 
