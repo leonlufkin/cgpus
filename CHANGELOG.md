@@ -10,8 +10,11 @@ All notable changes to this project will be documented in this file.
 - General process tagging system with configurable rules based on owner and process name
   - Tag `*` when all GPU processes are owned by "leon"
   - Tag `RL` when all GPU processes contain "ray::WorkerDict"
-  - Tag `CM` when all GPU processes contain "cmoe"
-  - Tags only applied when ALL processes match exactly one criterion (no conflicts)
+  - Tag `CM` when all GPU processes contain "cmoe" in command line
+  - Tag `AU` when all GPU processes contain "lisan_al_gaib" in command line
+  - Tags persist until replaced by a new tag (idle GPUs show last tag)
+  - Tags cleared when processes are mixed (multiple different tags)
+  - Tags only applied when ALL processes match exactly one criterion
 
 ## [2.0.0] - 2026-02-05
 
