@@ -441,9 +441,62 @@ check_gpus() {
         IFS='|' read -r _ _ _ _ _ idle_gpus_field yellow_gpus_field _ <<< "$result"
       fi
 
-      # Calculate combined length (approximate, will be close enough for padding)
+      # Calculate actual visible length by simulating the merge
       if [[ -n "$idle_gpus_field" || -n "$yellow_gpus_field" ]]; then
-        local combined_len=$((${#idle_gpus_field} + ${#yellow_gpus_field} + 3))  # +2 for parentheses, +1 for comma
+        # Build a simplified merged list to get accurate length
+        local -A temp_gpus
+        # Parse idle GPUs
+        for range in ${(s:,:)idle_gpus_field}; do
+          if [[ "$range" == *-* ]]; then
+            local start=${range%%-*}
+            local end=${range##*-}
+            for ((i=start; i<=end; i++)); do
+              temp_gpus[$i]="1"
+            done
+          elif [[ -n "$range" ]]; then
+            temp_gpus[$range]="1"
+          fi
+        done
+        # Parse yellow GPUs
+        for range in ${(s:,:)yellow_gpus_field}; do
+          if [[ "$range" == *-* ]]; then
+            local start=${range%%-*}
+            local end=${range##*-}
+            for ((i=start; i<=end; i++)); do
+              temp_gpus[$i]="1"
+            done
+          elif [[ -n "$range" ]]; then
+            temp_gpus[$range]="1"
+          fi
+        done
+
+        # Build visible string (without colors) for length calculation
+        local sorted_ids=(${(on)${(k)temp_gpus}})
+        local visible_str=""
+        local i=1
+        while [[ $i -le ${#sorted_ids[@]} ]]; do
+          local start=${sorted_ids[$i]}
+          local end=$start
+          # Find consecutive IDs
+          while [[ $((i+1)) -le ${#sorted_ids[@]} ]]; do
+            local next=${sorted_ids[$((i+1))]}
+            if [[ $((end+1)) -eq $next ]]; then
+              end=$next
+              i=$((i+1))
+            else
+              break
+            fi
+          done
+          [[ -n "$visible_str" ]] && visible_str="$visible_str,"
+          if [[ $start -eq $end ]]; then
+            visible_str="$visible_str$start"
+          else
+            visible_str="$visible_str$start-$end"
+          fi
+          i=$((i+1))
+        done
+
+        local combined_len=$((${#visible_str} + 2))  # +2 for parentheses
         if [[ $combined_len -gt $max_gpu_id_len ]]; then
           max_gpu_id_len=$combined_len
         fi
@@ -548,58 +601,93 @@ check_gpus() {
           fi
         done
 
-        # Build colored output with range collapsing by color
-        local sorted_ids=(${(on)${(k)gpu_colors}})
-        local output=""
-        local i=1
-        while [[ $i -le ${#sorted_ids[@]} ]]; do
-          local start=${sorted_ids[$i]}
-          local color=${gpu_colors[$start]}
-          local end=$start
-
-          # Find consecutive GPUs with same color
-          while [[ $((i+1)) -le ${#sorted_ids[@]} ]]; do
-            local next=${sorted_ids[$((i+1))]}
-            if [[ $((end+1)) -eq $next && ${gpu_colors[$next]} == $color ]]; then
-              end=$next
-              i=$((i+1))
-            else
-              break
-            fi
-          done
-
-          # Add to output with color
-          [[ -n "$output" ]] && output="$output,"
-
-          local color_code=""
-          [[ $color == "R" ]] && color_code="$RED" || color_code="$YELLOW"
-
-          if [[ $start -eq $end ]]; then
-            output="$output${color_code}$start${RESET}"
+        # Build colored output grouped by color (red first, then yellow)
+        # Separate IDs by color
+        local red_ids=()
+        local yellow_ids=()
+        for id in ${(k)gpu_colors}; do
+          if [[ ${gpu_colors[$id]} == "R" ]]; then
+            red_ids+=($id)
           else
-            output="$output${color_code}$start-$end${RESET}"
+            yellow_ids+=($id)
           fi
-
-          i=$((i+1))
         done
 
-        gpu_section="($output)"
+        # Sort each group numerically
+        red_ids=(${(on)red_ids})
+        yellow_ids=(${(on)yellow_ids})
+
+        # Build output: process red IDs first, then yellow IDs
+        local output=""
+        for color_group in "R" "Y"; do
+          local ids=()
+          if [[ $color_group == "R" ]]; then
+            ids=($red_ids)
+          else
+            ids=($yellow_ids)
+          fi
+
+          local i=1
+          while [[ $i -le ${#ids[@]} ]]; do
+            local start=${ids[$i]}
+            local end=$start
+
+            # Find consecutive IDs
+            while [[ $((i+1)) -le ${#ids[@]} ]]; do
+              local next=${ids[$((i+1))]}
+              if [[ $((end+1)) -eq $next ]]; then
+                end=$next
+                i=$((i+1))
+              else
+                break
+              fi
+            done
+
+            # Add to output with color
+            [[ -n "$output" ]] && output="$output,"
+
+            local color_code=""
+            [[ $color_group == "R" ]] && color_code="$RED" || color_code="$YELLOW"
+
+            if [[ $start -eq $end ]]; then
+              output="$output${color_code}$start${RESET}"
+            else
+              output="$output${color_code}$start-$end${RESET}"
+            fi
+
+            i=$((i+1))
+          done
+        done
+
+        gpu_section="(${output}"
+        # Closing paren will be added later with row color
       fi
 
       # Calculate visible length (excluding ANSI escape codes) and pad manually
+      # Add 1 for closing paren in length calculation
       local visible_section="$gpu_section"
+      if [[ -n "$gpu_section" ]]; then
+        visible_section="${visible_section})"
+      fi
       # Remove ANSI escape codes for length calculation
-      visible_section=$(echo "$gpu_section" | sed 's/\x1b\[[0-9;]*m//g')
+      visible_section=$(echo "$visible_section" | sed 's/\x1b\[[0-9;]*m//g')
       local visible_len=${#visible_section}
       local padding=$((max_gpu_id_len - visible_len))
       [[ $padding -lt 0 ]] && padding=0
 
-      # Append gpu_section with manual padding
+      # Track whether we have GPU section for closing paren
+      local has_gpu_section=0
+      if [[ -n "$gpu_section" ]]; then
+        has_gpu_section=1
+      fi
+
+      # Append gpu_section (without closing paren yet) with manual padding
       formatted="$formatted  ${gpu_section}$(printf "%${padding}s" "")"
 
       # Add CPU stats if in CPU mode
+      local cpu_stats=""
       if [[ $enable_cpu -eq 1 ]]; then
-        formatted="$formatted  $(printf '%3s%%' "$cpu_pct")  ${host_mem_used_tb}/${host_mem_total_tb} TB"
+        cpu_stats="  $(printf '%3s%%' "$cpu_pct")  ${host_mem_used_tb}/${host_mem_total_tb} TB"
       fi
 
       # Determine row color based on current state: red for any idle GPUs, yellow for yellow GPUs (if no idle)
@@ -658,10 +746,19 @@ check_gpus() {
       fi
 
       # Print: apply row color only to base, sparkline has its own colors
+      # Add closing paren with row color if GPU section exists
       if [[ -n "$row_color" ]]; then
-        printf "%-6s %b%b%b%s\n" "$host:" "$row_color" "$formatted_base" "$RESET" "$sparkline_str"
+        if [[ $has_gpu_section -eq 1 ]]; then
+          printf "%-6s %b%b)%b%s%s\n" "$host:" "$row_color" "$formatted_base" "$RESET" "$cpu_stats" "$sparkline_str"
+        else
+          printf "%-6s %b%b%b%s%s\n" "$host:" "$row_color" "$formatted_base" "$RESET" "$cpu_stats" "$sparkline_str"
+        fi
       else
-        printf "%-6s %b%s\n" "$host:" "$formatted_base" "$sparkline_str"
+        if [[ $has_gpu_section -eq 1 ]]; then
+          printf "%-6s %b)%s%s\n" "$host:" "$formatted_base" "$cpu_stats" "$sparkline_str"
+        else
+          printf "%-6s %b%s%s\n" "$host:" "$formatted_base" "$cpu_stats" "$sparkline_str"
+        fi
       fi
     else
       # Handle error messages or non-standard output
