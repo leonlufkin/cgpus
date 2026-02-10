@@ -244,7 +244,23 @@ is_valid_cached_tag() {
 
 calculate_sparkline_size() {
   local enable_cpu="${1:-0}"
-  local term_width=${COLUMNS:-$(tput cols 2>/dev/null || echo 120)}
+  local term_width
+  local stty_size
+  local term_width_candidate
+
+  stty_size="$(stty size < /dev/tty 2>/dev/null || true)"
+  term_width_candidate="${stty_size##* }"
+  if [[ "$term_width_candidate" =~ '^[0-9]+$' ]] && [[ $term_width_candidate -gt 0 ]]; then
+    term_width="$term_width_candidate"
+  else
+    term_width="$(tput cols 2>/dev/null || true)"
+    if ! ([[ "$term_width" =~ '^[0-9]+$' ]] && [[ $term_width -gt 0 ]]); then
+      term_width="${COLUMNS:-120}"
+      if ! ([[ "$term_width" =~ '^[0-9]+$' ]] && [[ $term_width -gt 0 ]]); then
+        term_width=120
+      fi
+    fi
+  fi
   local fixed_width=61
 
   if [[ $enable_cpu -eq 1 ]]; then
@@ -535,8 +551,9 @@ if [[ "${ENABLE_CPU:-0}" -eq 1 ]]; then
   mem_used_kb=$((mem_total_kb - mem_avail_kb))
 
   # /proc/meminfo is in KiB. Convert KiB -> TiB by dividing by 1024^3.
-  mem_total_tb="$(awk -v kb="$mem_total_kb" 'BEGIN {tb=kb/1073741824; if (tb < 1) printf "%.1f", tb; else printf "%.0f", tb}')"
-  mem_used_tb="$(awk -v kb="$mem_used_kb" 'BEGIN {tb=kb/1073741824; if (tb < 1) printf "%.1f", tb; else printf "%.0f", tb}')"
+  # Always render one decimal place to keep used/total formatting consistent.
+  mem_total_tb="$(awk -v kb="$mem_total_kb" 'BEGIN {tb=kb/1073741824; printf "%.1f", tb}')"
+  mem_used_tb="$(awk -v kb="$mem_used_kb" 'BEGIN {tb=kb/1073741824; printf "%.1f", tb}')"
 fi
 
 printf 'OK|%s|%s|%s|%s|%s\n' "$gpu_stats" "$process_tag" "$cpu_pct" "$mem_used_tb" "$mem_total_tb"

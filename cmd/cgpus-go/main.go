@@ -234,8 +234,9 @@ if [[ "${ENABLE_CPU:-0}" -eq 1 ]]; then
   mem_used_kb=$((mem_total_kb - mem_avail_kb))
 
   # /proc/meminfo is in KiB. Convert KiB -> TiB by dividing by 1024^3.
-  mem_total_tb="$(awk -v kb="$mem_total_kb" 'BEGIN {tb=kb/1073741824; if (tb < 1) printf "%.1f", tb; else printf "%.0f", tb}')"
-  mem_used_tb="$(awk -v kb="$mem_used_kb" 'BEGIN {tb=kb/1073741824; if (tb < 1) printf "%.1f", tb; else printf "%.0f", tb}')"
+  # Always render one decimal place to keep used/total formatting consistent.
+  mem_total_tb="$(awk -v kb="$mem_total_kb" 'BEGIN {tb=kb/1073741824; printf "%.1f", tb}')"
+  mem_used_tb="$(awk -v kb="$mem_used_kb" 'BEGIN {tb=kb/1073741824; printf "%.1f", tb}')"
 fi
 
 printf 'OK\t%s\t%s\t%s\t%s\t%s\n' "$gpu_stats" "$process_tag" "$cpu_pct" "$mem_used_tb" "$mem_total_tb"
@@ -667,19 +668,59 @@ func calculateSparklineSize(enableCPU bool) int {
 }
 
 func terminalWidth() int {
+	if ttyCols, ok := terminalWidthFromTTY(); ok {
+		return ttyCols
+	}
+
+	if tputCols, ok := terminalWidthFromTput(); ok {
+		return tputCols
+	}
+
 	if cols := os.Getenv("COLUMNS"); cols != "" {
 		if n, err := strconv.Atoi(cols); err == nil && n > 0 {
 			return n
 		}
 	}
+	return 120
+}
+
+func terminalWidthFromTTY() (int, bool) {
+	tty, err := os.Open("/dev/tty")
+	if err != nil {
+		return 0, false
+	}
+	defer tty.Close()
+
+	cmd := exec.Command("stty", "size")
+	cmd.Stdin = tty
+	out, err := cmd.Output()
+	if err != nil {
+		return 0, false
+	}
+
+	fields := strings.Fields(strings.TrimSpace(string(out)))
+	if len(fields) < 2 {
+		return 0, false
+	}
+
+	n, err := strconv.Atoi(fields[len(fields)-1])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
+}
+
+func terminalWidthFromTput() (int, bool) {
 	cmd := exec.Command("tput", "cols")
 	out, err := cmd.Output()
-	if err == nil {
-		if n, parseErr := strconv.Atoi(strings.TrimSpace(string(out))); parseErr == nil && n > 0 {
-			return n
-		}
+	if err != nil {
+		return 0, false
 	}
-	return 120
+	n, err := strconv.Atoi(strings.TrimSpace(string(out)))
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	return n, true
 }
 
 func stdoutIsTTY() bool {
