@@ -9,6 +9,7 @@ All notable changes to this project will be documented in this file.
 - Contributing section in README.md linking to TODO.md
 - General process tagging system with configurable rules based on owner and process name
   - Tag `*` when all GPU processes are owned by "leon"
+  - Tag `KK` when all GPU processes are owned by "kamesh"
   - Tag `RL` when all GPU processes contain "ray::WorkerDict" OR owned by "pritish"
   - Tag `CM` when all GPU processes contain "cmoe" in command line
   - Tag `AU` when all GPU processes contain "lisan.al_gaib" or "zonos" in command line
@@ -20,6 +21,16 @@ All notable changes to this project will be documented in this file.
   - Tag count summary displayed at bottom (only counts current tags, not persisting)
   - Individual GPU IDs in parentheses now colored by status (red for idle, yellow for underutilized)
   - Entire row still colored based on worst status (red if any idle, yellow if only underutilized)
+- `cgpus-zsh` backend with modularized probe/render flow
+- `cgpus-go` backend (`cmd/cgpus-go`) with tests
+- Launcher backend selection via `CGPUS_BACKEND=auto|zsh|go`
+- Backend/build docs under `docs/`
+- Last-tag cache persisted to `~/.cache/cgpus/last_tags.tsv` (or `$XDG_CACHE_HOME`)
+
+### Changed
+- `cgpus` is now a launcher that delegates to zsh or Go backend
+- Refresh mode uses SSH multiplexing (`ControlMaster`, `ControlPersist`, `ControlPath`)
+- Usage/help text standardized to `cgpus` command name
 
 ## [2.0.0] - 2026-02-05
 

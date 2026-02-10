@@ -1,58 +1,69 @@
 # cgpus - GPU Monitoring Tool
 
-Monitor NVIDIA GPU availability, utilization, and performance across multiple remote hosts via SSH.
+Monitor NVIDIA GPU availability, utilization, and power across multiple remote hosts via SSH.
 
 ## Features
 
-### cgpus (v2.0) - Enhanced Version
-- **Advanced Metrics**: GPU utilization, power draw, memory per GPU
-- **Refresh Mode**: Continuous monitoring with configurable intervals
-- **CPU Monitoring**: Optional CPU utilization and host memory stats
-- **Sparkline History**: Visual power consumption history with color coding
-- **Smart Coloring**: Red (idle GPUs), Yellow (underutilized), White (busy)
-- **Dynamic Layout**: Auto-adjusting column widths based on data
-- **Smart Detection**: Multi-factor idle GPU detection
+### cgpus (v2)
+- Advanced metrics: GPU utilization, power draw, and memory per GPU
+- Refresh mode with configurable interval (`-f [INTERVAL]`)
+- Optional CPU and host memory stats (`--cpu`)
+- Sparkline history with color coding
+- Process tagging with persistence (`*`, `KK`, `RL`, `CM`, `AU`, `DA`, `AR`)
+- Last-tag cache persisted across runs (`~/.cache/cgpus/last_tags.tsv`)
+- Dynamic layout based on terminal width
+- SSH multiplexing in refresh mode to reduce connection overhead
 
-### cgpus0 (v1.0) - Legacy Version
-- **Simple & Fast**: Basic GPU availability checking
-- **Lightweight**: ~70 lines of code
-- **Color Output**: Red for available GPUs
-- **One-shot**: Quick checks without continuous monitoring
+### Backends
+- `cgpus-zsh`: shell implementation with no compile step
+- `cgpus-go`: Go implementation (compiled to `.bin/cgpus-go` on first run)
+- `cgpus`: launcher that selects backend based on `CGPUS_BACKEND`
+
+### Legacy
+- `legacy/cgpus0`: simple one-shot availability checker
+
+## Prerequisites
+
+### Local machine
+- `zsh`
+- SSH key-based access to target hosts
+- Optional: Go toolchain (`go`) if you want to build/use Go backend
+
+### Remote hosts
+- Linux hosts with `nvidia-smi`
+- Standard utilities used by probe logic (`awk`, `ps`, `/proc`)
 
 ## Installation
 
-### Prerequisites
-- `zsh` shell
-- NVIDIA GPU tools (`nvidia-smi`) on remote hosts
-- SSH with key-based authentication
-- For cgpus v2: `bc`, `top`, `free`, `awk`
-
-### Steps
 1. Clone the repository:
-   ```bash
-   git clone https://github.com/leonlufkin/cgpus.git
-   cd cgpus
-   ```
 
-2. Copy scripts to your PATH:
-   ```bash
-   # Enhanced version (recommended)
-   cp cgpus ~/.local/bin/
-   chmod +x ~/.local/bin/cgpus
+```bash
+git clone https://github.com/leonlufkin/cgpus.git
+cd cgpus
+```
 
-   # Legacy version (optional)
-   cp legacy/cgpus0 ~/.local/bin/
-   chmod +x ~/.local/bin/cgpus0
-   ```
+2. Install launchers in your PATH:
 
-3. Configure SSH groups:
-   ```bash
-   # Copy example configuration
-   cp examples/ssh_key_groups.sh.example ~/.ssh/ssh_key_groups.sh
+```bash
+cp cgpus ~/.local/bin/
+cp cgpus-zsh ~/.local/bin/
+cp cgpus-go ~/.local/bin/
+chmod +x ~/.local/bin/cgpus ~/.local/bin/cgpus-zsh ~/.local/bin/cgpus-go
+```
 
-   # Edit with your host groups
-   vim ~/.ssh/ssh_key_groups.sh
-   ```
+3. Optional: install legacy command:
+
+```bash
+cp legacy/cgpus0 ~/.local/bin/
+chmod +x ~/.local/bin/cgpus0
+```
+
+4. Configure host groups:
+
+```bash
+cp examples/ssh_key_groups.sh.example ~/.ssh/ssh_key_groups.sh
+$EDITOR ~/.ssh/ssh_key_groups.sh
+```
 
 ## Configuration
 
@@ -66,71 +77,64 @@ typeset -A GROUPS=(
 )
 ```
 
+## Backend Selection
+
+Select backend with `CGPUS_BACKEND`:
+
+- `auto` (default): prefer Go backend when available, otherwise zsh
+- `go`: force Go backend
+- `zsh`: force zsh backend
+
+Examples:
+
+```bash
+CGPUS_BACKEND=auto cgpus my-cluster
+CGPUS_BACKEND=go cgpus -f 5 my-cluster
+CGPUS_BACKEND=zsh cgpus --cpu my-cluster
+```
+
+Note: `cgpus-go` builds a cached binary at `.bin/cgpus-go` when sources change.
+
 ## Usage
 
-### cgpus (v2.0)
+Basic:
 
-**Basic usage:**
 ```bash
 cgpus my-cluster
 ```
 
-**With CPU monitoring:**
+With CPU stats:
+
 ```bash
 cgpus --cpu my-cluster
 ```
 
-**Refresh mode (updates every 10 seconds):**
+Refresh every 10 seconds:
+
 ```bash
 cgpus -f 10 my-cluster
 ```
 
-**Combined:**
+Combined:
+
 ```bash
 cgpus --cpu -f 5 my-cluster
 ```
 
-**Example output:**
-```
-vp2:   0/8*     100%   590.2W   59.4/80 GB                8%  0.1/2 TB   ▇▇▇
-vp11:  3/7       25%   262.5W   36.3/80 GB  (2-6)       2.2%  0.4/2 TB   ▃▃▃
-vp44:  8/8        0%    70.3W    0.0/80 GB  (0-7)       0.3%  0.0/2 TB
-```
+## Refresh Performance
 
-### cgpus0 (v1.0)
+In refresh mode, SSH is invoked with multiplexing options:
 
-**Basic usage:**
-```bash
-cgpus0 my-cluster
-```
+- `ControlMaster=auto`
+- `ControlPersist=600`
+- `ControlPath=~/.ssh/cgpus-%C`
 
-**Example output:**
-```
-gpu-node-1: 2/8 GPUs available
-gpu-node-2: 0/8 GPUs available
-gpu-node-3: 4/8 GPUs available
-```
-
-## Feature Comparison
-
-| Feature | cgpus0 (v1.0) | cgpus (v2.0) |
-|---------|---------------|--------------|
-| GPU Availability | Yes | Yes |
-| Power Draw | No | Yes |
-| GPU Utilization | No | Yes |
-| Memory per GPU | No | Yes |
-| CPU Monitoring | No | Yes (--cpu) |
-| Host Memory | No | Yes (--cpu) |
-| Refresh Mode | No | Yes (-f) |
-| Sparkline History | No | Yes |
-| Color-coded History | No | Yes |
-| Dynamic Layout | No | Yes |
-| Lines of Code | ~70 | ~550 |
+This avoids a full SSH handshake on each refresh iteration after the first connection.
 
 ## Contributing
 
-Contributions are welcome! See [TODO.md](TODO.md) for planned improvements and feature ideas.
+Contributions are welcome. See `TODO.md` and docs in `docs/`.
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) file for details.
+MIT License - see `LICENSE`.

@@ -1,0 +1,725 @@
+#!/bin/zsh
+# cgpus zsh backend
+# Usage: cgpus [--cpu] [-f [INTERVAL]] GROUP
+
+setopt pipefail
+setopt typeset_silent
+
+readonly DEFAULT_REFRESH_INTERVAL=30
+readonly IDLE_POWER_W=100
+readonly IDLE_MEM_MB=1024
+readonly IDLE_UTIL_PCT=5
+readonly YELLOW_SPARE_MEM_GB=40
+readonly YELLOW_POWER_W=250
+
+readonly RED=$'\033[31m'
+readonly YELLOW=$'\033[33m'
+readonly RESET=$'\033[0m'
+readonly USAGE_NAME="cgpus"
+
+typeset -g OPT_CPU=0
+typeset -g OPT_REFRESH=0
+typeset -g OPT_INTERVAL=$DEFAULT_REFRESH_INTERVAL
+typeset -g OPT_GROUP=""
+
+typeset -gA GROUPS
+typeset -gA POWER_HISTORY
+typeset -gA LAST_TAG
+typeset -g LAST_TAG_CACHE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/cgpus/last_tags.tsv"
+
+typeset -ga SSH_BASE_OPTS
+typeset -ga SSH_REFRESH_OPTS
+
+print_usage() {
+  cat <<EOF_USAGE
+Usage: ${USAGE_NAME} [--cpu] [-f [INTERVAL]] GROUP
+  --cpu         Show CPU load and host memory usage
+  -f            Enable refresh mode (default: 30s interval)
+  -f INTERVAL   Enable refresh mode with custom interval (seconds)
+
+Examples:
+  ${USAGE_NAME} zyphra
+  ${USAGE_NAME} --cpu zyphra
+  ${USAGE_NAME} -f zyphra
+  ${USAGE_NAME} -f 5 zyphra
+  ${USAGE_NAME} --cpu -f 5 zyphra
+EOF_USAGE
+}
+
+parse_args() {
+  local i=1
+  while [[ $i -le $# ]]; do
+    local arg="${@[$i]}"
+    if [[ "$arg" == "--cpu" ]]; then
+      OPT_CPU=1
+    elif [[ "$arg" == "-f" ]]; then
+      OPT_REFRESH=1
+      local next_i=$((i + 1))
+      if [[ $next_i -le $# ]]; then
+        local next_arg="${@[$next_i]}"
+        if [[ "$next_arg" =~ '^[0-9]+$' ]]; then
+          OPT_INTERVAL="$next_arg"
+          i=$next_i
+        fi
+      fi
+    elif [[ "$arg" == -* ]]; then
+      echo "Unknown option: $arg" >&2
+      print_usage
+      return 1
+    elif [[ -z "$OPT_GROUP" ]]; then
+      OPT_GROUP="$arg"
+    else
+      echo "Unexpected argument: $arg" >&2
+      print_usage
+      return 1
+    fi
+    i=$((i + 1))
+  done
+
+  if [[ -z "$OPT_GROUP" ]]; then
+    print_usage
+    return 1
+  fi
+
+  if [[ $OPT_INTERVAL -lt 1 ]]; then
+    echo "Error: Refresh interval must be at least 1 second" >&2
+    return 1
+  fi
+
+  return 0
+}
+
+load_groups() {
+  local groups_file="${HOME}/.ssh/ssh_key_groups.sh"
+  if [[ ! -r "$groups_file" ]]; then
+    echo "Missing group config: $groups_file" >&2
+    return 1
+  fi
+
+  local groups_dump
+  groups_dump="$(
+    GROUPS_FILE="$groups_file" zsh -lc '
+      source "$GROUPS_FILE" >/dev/null 2>&1 || exit 1
+      for k v in ${(kv)GROUPS}; do
+        print -r -- "$k"$'\''\t'\''"$v"
+      done
+    ' 2>/dev/null
+  )" || {
+    echo "Failed to load groups from: $groups_file" >&2
+    return 1
+  }
+
+  typeset -gA GROUPS
+  GROUPS=()
+  local key hosts
+  while IFS=$'\t' read -r key hosts; do
+    [[ -z "$key" ]] && continue
+    GROUPS[$key]="$hosts"
+  done <<< "$groups_dump"
+
+  if [[ -z "${GROUPS[$OPT_GROUP]:-}" ]]; then
+    echo "Group '$OPT_GROUP' is not defined." >&2
+    return 1
+  fi
+
+  return 0
+}
+
+init_ssh_options() {
+  SSH_BASE_OPTS=(
+    -o BatchMode=yes
+    -o ConnectTimeout=5
+  )
+
+  SSH_REFRESH_OPTS=()
+  if [[ $OPT_REFRESH -eq 1 ]]; then
+    local control_path="${HOME}/.ssh/cgpus-%C"
+    SSH_REFRESH_OPTS=(
+      -o ControlMaster=auto
+      -o ControlPersist=600
+      -o ControlPath="$control_path"
+    )
+  fi
+}
+
+load_last_tag_cache() {
+  local cache_file="$LAST_TAG_CACHE_FILE"
+  [[ -r "$cache_file" ]] || return 0
+
+  while IFS=$'\t' read -r host tag; do
+    [[ -z "$host" ]] && continue
+    is_valid_cached_tag "$tag" || continue
+    LAST_TAG[$host]="$tag"
+  done < "$cache_file"
+}
+
+save_last_tag_cache() {
+  local cache_file="$LAST_TAG_CACHE_FILE"
+  local cache_dir="${cache_file:h}"
+
+  mkdir -p "$cache_dir" 2>/dev/null || return 0
+
+  local tmp_file
+  tmp_file=$(mktemp "${cache_dir}/last_tags.XXXXXX" 2>/dev/null) || return 0
+
+  for host in ${(ok)LAST_TAG}; do
+    local tag="${LAST_TAG[$host]:-}"
+    [[ -z "$tag" ]] && continue
+    is_valid_cached_tag "$tag" || continue
+    printf '%s\t%s\n' "$host" "$tag" >> "$tmp_file"
+  done
+
+  mv "$tmp_file" "$cache_file" 2>/dev/null || rm -f "$tmp_file"
+}
+
+is_valid_cached_tag() {
+  case "$1" in
+    "*"|"KK"|"RL"|"CM"|"AU"|"DA"|"AR")
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+calculate_sparkline_size() {
+  local enable_cpu="${1:-0}"
+  local term_width=${COLUMNS:-$(tput cols 2>/dev/null || echo 120)}
+  local fixed_width=61
+
+  if [[ $enable_cpu -eq 1 ]]; then
+    # CPU+host-mem section estimate: "  %3s%%  used/total TB" ~= 19 chars
+    fixed_width=$((fixed_width + 19))
+  fi
+
+  local max_size=$((term_width - fixed_width - 4))
+  [[ $max_size -gt 20 ]] && max_size=20
+  [[ $max_size -lt 5 ]] && max_size=5
+  echo "$max_size"
+}
+
+append_history() {
+  local host="$1"
+  local entry="$2"
+  local max_history="$3"
+
+  local -a values
+  if [[ -n "${POWER_HISTORY[$host]:-}" ]]; then
+    values=(${=POWER_HISTORY[$host]})
+  else
+    values=()
+  fi
+
+  values+=("$entry")
+  if [[ ${#values[@]} -gt $max_history ]]; then
+    values=("${(@)values[-$max_history,-1]}")
+  fi
+
+  POWER_HISTORY[$host]="${(j: :)values}"
+}
+
+generate_sparkline() {
+  local history="$1"
+  local sparkline=""
+  local blocks=(' ' ▂ ▃ ▄ ▅ ▆ ▇ █)
+
+  for entry in ${(z)history}; do
+    if [[ "$entry" == "-1" || "$entry" == "-1:"* ]]; then
+      sparkline+=" "
+    else
+      local pwr="${entry%%:*}"
+      local clr="none"
+      if [[ "$entry" == *:* ]]; then
+        clr="${entry##*:}"
+      fi
+
+      local index=$(((pwr * 7) / 700))
+      [[ $index -lt 0 ]] && index=0
+      [[ $index -gt 7 ]] && index=7
+
+      local block="${blocks[$((index + 1))]}"
+      if [[ "$clr" == "red" ]]; then
+        sparkline+="${RED}${block}${RESET}"
+      elif [[ "$clr" == "yellow" ]]; then
+        sparkline+="${YELLOW}${block}${RESET}"
+      else
+        sparkline+="$block"
+      fi
+    fi
+  done
+
+  echo "$sparkline"
+}
+
+probe_host() {
+  local host="$1"
+  local enable_cpu="$2"
+
+  local -a ssh_cmd=(
+    ssh
+    "${SSH_BASE_OPTS[@]}"
+    "${SSH_REFRESH_OPTS[@]}"
+    "$host"
+    "ENABLE_CPU=$enable_cpu IDLE_POWER_W=$IDLE_POWER_W IDLE_MEM_MB=$IDLE_MEM_MB IDLE_UTIL_PCT=$IDLE_UTIL_PCT YELLOW_SPARE_MEM_GB=$YELLOW_SPARE_MEM_GB YELLOW_POWER_W=$YELLOW_POWER_W bash -s"
+  )
+
+  local result
+  result="$(${ssh_cmd[@]} <<'REMOTE_PROBE' 2>/dev/null
+set -o pipefail
+
+if ! command -v nvidia-smi >/dev/null 2>&1; then
+  printf 'ERR|nvidia_missing\n'
+  exit 0
+fi
+
+gpu_stats="$(nvidia-smi --query-gpu=index,memory.used,memory.total,utilization.gpu,power.draw --format=csv,noheader,nounits 2>/dev/null | awk -F',' -v idle_power="${IDLE_POWER_W:-100}" -v idle_mem="${IDLE_MEM_MB:-1024}" -v idle_util="${IDLE_UTIL_PCT:-5}" -v yellow_spare="${YELLOW_SPARE_MEM_GB:-40}" -v yellow_power="${YELLOW_POWER_W:-250}" '
+BEGIN {
+  idle_count=0
+  total_util=0
+  total_power=0
+  total_mem_used=0
+  total_mem_total=0
+  gpu_count=0
+}
+NF >= 5 {
+  gpu_count++
+  gpu_index=int($1)
+  mem_used=$2+0
+  mem_total=$3+0
+  util=$4+0
+  power=$5+0
+
+  total_util += util
+  total_power += power
+  total_mem_used += mem_used
+  total_mem_total += mem_total
+
+  if (power < idle_power && mem_used < idle_mem && util < idle_util) {
+    idle_count++
+  }
+
+  spare_mem_gpu = (mem_total - mem_used) / 1024
+  if (spare_mem_gpu > yellow_spare || power < yellow_power) {
+    yellow[gpu_index] = 1
+  }
+}
+END {
+  if (gpu_count == 0) {
+    exit 1
+  }
+
+  avg_util = total_util / gpu_count
+  avg_power = total_power / gpu_count
+  mem_used_gb = (total_mem_used / 1024) / gpu_count
+  mem_total_gb = (total_mem_total / 1024) / gpu_count
+
+  yellow_str = ""
+  range_start = -1
+  range_end = -1
+  for (i = 0; i < gpu_count; i++) {
+    if (yellow[i] == 1) {
+      if (range_start == -1) {
+        range_start = i
+        range_end = i
+      } else if (i == range_end + 1) {
+        range_end = i
+      } else {
+        if (yellow_str != "") yellow_str = yellow_str ","
+        if (range_start == range_end) {
+          yellow_str = yellow_str range_start
+        } else {
+          yellow_str = yellow_str range_start "-" range_end
+        }
+        range_start = i
+        range_end = i
+      }
+    }
+  }
+
+  if (range_start != -1) {
+    if (yellow_str != "") yellow_str = yellow_str ","
+    if (range_start == range_end) {
+      yellow_str = yellow_str range_start
+    } else {
+      yellow_str = yellow_str range_start "-" range_end
+    }
+  }
+
+  printf "%d|%d|%.0f|%.1f|%.1f|%.0f|%s", idle_count, gpu_count, avg_util, avg_power, mem_used_gb, mem_total_gb, yellow_str
+}')"
+
+if [[ -z "$gpu_stats" ]]; then
+  printf 'ERR|parse_error\n'
+  exit 0
+fi
+
+process_tag=""
+process_data="$(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader,nounits 2>/dev/null || true)"
+
+if [[ -n "$process_data" ]]; then
+  check_leon=1
+  check_ray=1
+  check_cmoe=1
+  check_au=1
+  check_da=1
+  check_ar=1
+  check_kk=1
+  num_processes=0
+
+  while IFS=',' read -r pid proc_name; do
+    pid="${pid//[[:space:]]/}"
+    [[ -z "$pid" ]] && continue
+
+    num_processes=$((num_processes + 1))
+
+    ps_line="$(ps -o user=,args= -p "$pid" 2>/dev/null)"
+    owner="${ps_line%% *}"
+    cmd_line="${ps_line#* }"
+    if [[ -z "$ps_line" ]]; then
+      owner=""
+      cmd_line=""
+    fi
+
+    [[ "$owner" != "leon" ]] && check_leon=0
+    [[ "$proc_name" != *"ray::WorkerDict"* && "$owner" != "pritish" ]] && check_ray=0
+    [[ "$cmd_line" != *"cmoe"* ]] && check_cmoe=0
+    [[ "$cmd_line" != *"lisan.al_gaib"* && "$cmd_line" != *"zonos"* ]] && check_au=0
+    [[ "$owner" != "xiao" && "$cmd_line" != *"dataInfra"* ]] && check_da=0
+    [[ "$cmd_line" != *"pretrain_gpt"* ]] && check_ar=0
+    [[ "$owner" != "kamesh" ]] && check_kk=0
+  done <<< "$process_data"
+
+  if [[ $num_processes -gt 0 ]]; then
+    tag_count=$((check_leon + check_ray + check_cmoe + check_au + check_da + check_ar + check_kk))
+    if [[ $tag_count -eq 1 ]]; then
+      [[ $check_leon -eq 1 ]] && process_tag="*"
+      [[ $check_ray -eq 1 ]] && process_tag="RL"
+      [[ $check_cmoe -eq 1 ]] && process_tag="CM"
+      [[ $check_au -eq 1 ]] && process_tag="AU"
+      [[ $check_da -eq 1 ]] && process_tag="DA"
+      [[ $check_ar -eq 1 ]] && process_tag="AR"
+      [[ $check_kk -eq 1 ]] && process_tag="KK"
+    elif [[ $tag_count -gt 1 ]]; then
+      process_tag="MIXED"
+    else
+      process_tag="NONE"
+    fi
+  fi
+fi
+
+cpu_pct=""
+mem_used_tb=""
+mem_total_tb=""
+if [[ "${ENABLE_CPU:-0}" -eq 1 ]]; then
+  read -r u1 n1 s1 i1 w1 irq1 sirq1 <<<"$(awk '/^cpu / {print $2, $3, $4, $5, $6, $7, $8}' /proc/stat 2>/dev/null)"
+  sleep 0.1
+  read -r u2 n2 s2 i2 w2 irq2 sirq2 <<<"$(awk '/^cpu / {print $2, $3, $4, $5, $6, $7, $8}' /proc/stat 2>/dev/null)"
+
+  idle1=$((i1 + w1))
+  idle2=$((i2 + w2))
+  non1=$((u1 + n1 + s1 + irq1 + sirq1))
+  non2=$((u2 + n2 + s2 + irq2 + sirq2))
+  total1=$((idle1 + non1))
+  total2=$((idle2 + non2))
+  delta_total=$((total2 - total1))
+  delta_idle=$((idle2 - idle1))
+
+  if [[ $delta_total -gt 0 ]]; then
+    cpu_pct=$(((100 * (delta_total - delta_idle) + delta_total / 2) / delta_total))
+  else
+    cpu_pct=0
+  fi
+
+  mem_total_kb="$(awk '/^MemTotal:/ {print $2}' /proc/meminfo 2>/dev/null)"
+  mem_avail_kb="$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo 2>/dev/null)"
+  if [[ -z "$mem_avail_kb" ]]; then
+    mem_avail_kb="$(awk '/^MemFree:/ {print $2}' /proc/meminfo 2>/dev/null)"
+  fi
+
+  if [[ -z "$mem_total_kb" || -z "$mem_avail_kb" ]]; then
+    mem_total_kb=0
+    mem_avail_kb=0
+  fi
+
+  mem_used_kb=$((mem_total_kb - mem_avail_kb))
+
+  # /proc/meminfo is in KiB. Convert KiB -> TiB by dividing by 1024^3.
+  mem_total_tb="$(awk -v kb="$mem_total_kb" 'BEGIN {tb=kb/1073741824; if (tb < 1) printf "%.1f", tb; else printf "%.0f", tb}')"
+  mem_used_tb="$(awk -v kb="$mem_used_kb" 'BEGIN {tb=kb/1073741824; if (tb < 1) printf "%.1f", tb; else printf "%.0f", tb}')"
+fi
+
+printf 'OK|%s|%s|%s|%s|%s\n' "$gpu_stats" "$process_tag" "$cpu_pct" "$mem_used_tb" "$mem_total_tb"
+REMOTE_PROBE
+)"
+
+  local rc=$?
+  if [[ $rc -ne 0 || -z "${result// }" ]]; then
+    printf 'ERR|ssh_fail\n'
+    return 0
+  fi
+
+  printf '%s\n' "$result"
+}
+
+render_snapshot() {
+  local group="$1"
+  local enable_history="$2"
+  local max_history="$3"
+  local enable_cpu="$4"
+
+  if [[ -z "${GROUPS[$group]:-}" ]]; then
+    echo "Group '$group' is not defined." >&2
+    return 1
+  fi
+
+  local -a nodes
+  nodes=(${(s: :)GROUPS[$group]})
+
+  local tmp_dir
+  tmp_dir=$(mktemp -d -t cgpus_results)
+
+  for host in $nodes; do
+    (
+      probe_host "$host" "$enable_cpu" > "$tmp_dir/$host"
+    ) &
+  done
+  wait
+
+  typeset -A REC_STATE
+  typeset -A REC_REASON
+  typeset -A REC_IDLE
+  typeset -A REC_TOTAL
+  typeset -A REC_UTIL
+  typeset -A REC_POWER
+  typeset -A REC_MEM_USED
+  typeset -A REC_MEM_TOTAL
+  typeset -A REC_YELLOW
+  typeset -A REC_RAW_TAG
+  typeset -A REC_CPU
+  typeset -A REC_HOST_MEM_USED
+  typeset -A REC_HOST_MEM_TOTAL
+
+  local max_gpu_id_len=10
+  local max_cpu_mem_len=8
+
+  for host in $nodes; do
+    local rec
+    rec=$(<"$tmp_dir/$host")
+    if [[ -z "${rec// }" ]]; then
+      rec='ERR|empty'
+    fi
+
+    local state idle total util power mem_used mem_total yellow raw_tag cpu_pct host_mem_used_tb host_mem_total_tb
+    IFS='|' read -r state idle total util power mem_used mem_total yellow raw_tag cpu_pct host_mem_used_tb host_mem_total_tb <<< "$rec"
+
+    REC_STATE[$host]="$state"
+    if [[ "$state" == "OK" ]]; then
+      REC_IDLE[$host]="$idle"
+      REC_TOTAL[$host]="$total"
+      REC_UTIL[$host]="$util"
+      REC_POWER[$host]="$power"
+      REC_MEM_USED[$host]="$mem_used"
+      REC_MEM_TOTAL[$host]="$mem_total"
+      REC_YELLOW[$host]="$yellow"
+      REC_RAW_TAG[$host]="$raw_tag"
+      REC_CPU[$host]="$cpu_pct"
+      REC_HOST_MEM_USED[$host]="$host_mem_used_tb"
+      REC_HOST_MEM_TOTAL[$host]="$host_mem_total_tb"
+
+      if [[ $enable_cpu -eq 1 ]]; then
+        local mem_used_fmt="${host_mem_used_tb:-0.0}"
+        local mem_total_fmt="${host_mem_total_tb:-0.0}"
+        local cpu_mem_field="${mem_used_fmt}/${mem_total_fmt} TB"
+        local cpu_mem_len=${#cpu_mem_field}
+        if [[ $cpu_mem_len -gt $max_cpu_mem_len ]]; then
+          max_cpu_mem_len=$cpu_mem_len
+        fi
+      fi
+
+      if [[ -n "$yellow" ]]; then
+        local yellow_len=$((${#yellow} + 2))
+        if [[ $yellow_len -gt $max_gpu_id_len ]]; then
+          max_gpu_id_len=$yellow_len
+        fi
+      fi
+    else
+      REC_REASON[$host]="$idle"
+    fi
+  done
+
+  typeset -A TAG_COUNTS
+
+  for host in $nodes; do
+    local state="${REC_STATE[$host]:-ERR}"
+
+    if [[ "$state" != "OK" ]]; then
+      if [[ $enable_history -eq 1 ]]; then
+        append_history "$host" "-1" "$max_history"
+      fi
+
+      local output="-"
+      if [[ $enable_history -eq 1 && -n "${POWER_HISTORY[$host]:-}" ]]; then
+        local base_width=$((38 + 2 + max_gpu_id_len))
+        if [[ $enable_cpu -eq 1 ]]; then
+          base_width=$((base_width + 8 + max_cpu_mem_len))
+        fi
+        output=$(printf "%-${base_width}s" "$output")
+        output+="$(generate_sparkline "${POWER_HISTORY[$host]}")"
+      fi
+
+      printf "%-6s %s\n" "$host:" "$output"
+      continue
+    fi
+
+    local idle="${REC_IDLE[$host]}"
+    local total="${REC_TOTAL[$host]}"
+    local util="${REC_UTIL[$host]}"
+    local power="${REC_POWER[$host]}"
+    local mem_used="${REC_MEM_USED[$host]}"
+    local mem_total="${REC_MEM_TOTAL[$host]}"
+    local yellow="${REC_YELLOW[$host]}"
+    local raw_tag="${REC_RAW_TAG[$host]}"
+    local cpu_pct="${REC_CPU[$host]}"
+    local host_mem_used_tb="${REC_HOST_MEM_USED[$host]}"
+    local host_mem_total_tb="${REC_HOST_MEM_TOTAL[$host]}"
+
+    local process_tag="$raw_tag"
+    if [[ "$process_tag" == "MIXED" || "$process_tag" == "NONE" ]]; then
+      LAST_TAG[$host]=""
+      process_tag=""
+    elif [[ -z "$process_tag" ]]; then
+      process_tag="${LAST_TAG[$host]:-}"
+    else
+      LAST_TAG[$host]="$process_tag"
+      TAG_COUNTS[$process_tag]=$((${TAG_COUNTS[$process_tag]:-0} + 1))
+    fi
+
+    local avail_info="${idle}/${total}"
+    if [[ -n "$process_tag" ]]; then
+      avail_info+=" ${process_tag}"
+    fi
+
+    local formatted
+    formatted=$(printf "%-7s %4.0f%% %7.1fW  %5.1f/%2.0f GB" "$avail_info" "$util" "$power" "$mem_used" "$mem_total")
+
+    local yellow_section=""
+    if [[ -n "$yellow" ]]; then
+      yellow_section="($yellow)"
+    fi
+    formatted+="  $(printf "%-${max_gpu_id_len}s" "$yellow_section")"
+
+    if [[ $enable_cpu -eq 1 ]]; then
+      [[ -z "$cpu_pct" ]] && cpu_pct="0"
+      [[ -z "$host_mem_used_tb" ]] && host_mem_used_tb="0.0"
+      [[ -z "$host_mem_total_tb" ]] && host_mem_total_tb="0.0"
+      local cpu_mem="${host_mem_used_tb}/${host_mem_total_tb} TB"
+      formatted+="  $(printf '%3s%%' "$cpu_pct")  $(printf "%-${max_cpu_mem_len}s" "$cpu_mem")"
+    fi
+
+    local row_color=""
+    local hist_color="none"
+    if [[ "$idle" =~ '^[0-9]+$' ]] && (( idle > 0 )); then
+      row_color="$RED"
+      hist_color="red"
+    elif [[ -n "$yellow" ]]; then
+      row_color="$YELLOW"
+      hist_color="yellow"
+    fi
+
+    local sparkline_str=""
+    if [[ $enable_history -eq 1 ]]; then
+      append_history "$host" "${power}:${hist_color}" "$max_history"
+      sparkline_str="$(generate_sparkline "${POWER_HISTORY[$host]}")"
+      sparkline_str=" ${sparkline_str}"
+    fi
+
+    if [[ -n "$row_color" ]]; then
+      printf "%-6s %b%s%b%s\n" "$host:" "$row_color" "$formatted" "$RESET" "$sparkline_str"
+    else
+      printf "%-6s %s%s\n" "$host:" "$formatted" "$sparkline_str"
+    fi
+  done
+
+  local -a tag_list=("*" "KK" "RL" "CM" "AU" "DA" "AR")
+  local has_tags=0
+  for tag in $tag_list; do
+    if [[ ${TAG_COUNTS[$tag]:-0} -gt 0 ]]; then
+      has_tags=1
+      break
+    fi
+  done
+
+  if [[ $has_tags -eq 1 ]]; then
+    printf "\n"
+    for tag in $tag_list; do
+      local count=${TAG_COUNTS[$tag]:-0}
+      if [[ $count -gt 0 ]]; then
+        printf "%s:%d  " "$tag" "$count"
+      fi
+    done
+    printf "\n"
+  fi
+
+  save_last_tag_cache
+
+  rm -r "$tmp_dir"
+}
+
+run_once() {
+  local sparkline_size
+  sparkline_size="$(calculate_sparkline_size "$OPT_CPU")"
+  render_snapshot "$OPT_GROUP" 0 "$sparkline_size" "$OPT_CPU"
+}
+
+run_refresh() {
+  trap 'echo ""; exit 0' INT TERM
+
+  local iteration=0
+  local first_run=1
+  local start_time=0
+  local end_time elapsed remaining
+  local sparkline_size snapshot current_time
+
+  while true; do
+    iteration=$((iteration + 1))
+
+    if [[ $first_run -eq 0 ]]; then
+      end_time=$(date +%s)
+      elapsed=$((end_time - start_time))
+      remaining=$((OPT_INTERVAL - elapsed))
+      if [[ $remaining -gt 0 ]]; then
+        sleep "$remaining"
+      fi
+    fi
+    first_run=0
+
+    start_time=$(date +%s)
+
+    sparkline_size="$(calculate_sparkline_size "$OPT_CPU")"
+
+    snapshot="$(render_snapshot "$OPT_GROUP" 1 "$sparkline_size" "$OPT_CPU")"
+
+    printf '\033[2J\033[H'
+    print -r -- "$snapshot"
+
+    current_time=$(date +%H:%M:%S)
+    printf "\nRefresh: %ds | Iteration: %d | Time: %s | Press Ctrl+C to exit" \
+      "$OPT_INTERVAL" "$iteration" "$current_time"
+  done
+}
+
+main() {
+  parse_args "$@" || exit 1
+  load_groups || exit 1
+  load_last_tag_cache
+  init_ssh_options
+
+  if [[ $OPT_REFRESH -eq 1 ]]; then
+    run_refresh
+  else
+    run_once
+  fi
+}
+
+main "$@"

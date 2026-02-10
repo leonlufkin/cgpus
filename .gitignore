@@ -5,3 +5,6 @@
 
 # Local configuration (users should copy from example)
 ssh_key_groups.sh
+
+# Local build artifacts
+.bin/

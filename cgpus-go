@@ -1,0 +1,36 @@
+#!/bin/zsh
+# cgpus go backend launcher
+
+setopt pipefail
+
+script_path="${0:A}"
+script_dir="${script_path:h}"
+compiled_backend="$script_dir/.bin/cgpus-go"
+source_main="$script_dir/cmd/cgpus-go/main.go"
+source_mod="$script_dir/go.mod"
+
+needs_build=0
+if [[ ! -x "$compiled_backend" ]]; then
+  needs_build=1
+elif [[ "$source_main" -nt "$compiled_backend" || "$source_mod" -nt "$compiled_backend" ]]; then
+  needs_build=1
+fi
+
+if [[ $needs_build -eq 1 ]]; then
+  if ! command -v go >/dev/null 2>&1; then
+    echo "go toolchain is required to build cgpus-go backend" >&2
+    exit 1
+  fi
+  mkdir -p "$script_dir/.bin"
+  if ! (cd "$script_dir" && go build -o "$compiled_backend" ./cmd/cgpus-go); then
+    echo "failed to build go backend" >&2
+    exit 1
+  fi
+fi
+
+if [[ -x "$compiled_backend" ]]; then
+  exec "$compiled_backend" "$@"
+fi
+
+echo "compiled go backend not available: $compiled_backend" >&2
+exit 1

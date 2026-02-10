@@ -1,18 +1,23 @@
 # TODO
 
 ## Performance
-- Use SSH ControlMaster/ControlPersist to reuse connections in refresh mode (currently reconnects every iteration)
-  - Current behavior: Creates new SSH connection on every refresh (~100ms overhead per host)
-  - Proposed solution: Add `-o ControlMaster=auto -o ControlPath=~/.ssh/cm-%r@%h:%p -o ControlPersist=10m` to SSH command
-  - Expected improvement: ~90% reduction in connection overhead (5-10ms per host after first connection)
-  - Implementation: Modify SSH command in `check_gpus()` function around line 164
+- Add bounded worker pool in zsh backend to avoid overload on very large clusters
+- Add per-host probe timeout controls via CLI/env
+- Add lightweight metrics for refresh latency per cycle
 
 ## Features
 - Connection status indicators (green/yellow/red dots for host health)
 - `--log` flag to append results to file with timestamps
-- Config file support (~/.cgpusrc) for default hosts and settings instead of shell script
+- Config file support (`~/.cgpusrc`) for defaults
+- Optional JSON output mode for downstream tooling
+
+## Backend
+- Add release build pipeline for precompiled `cgpus-go` binaries
+- Add parity test fixtures comparing zsh and Go outputs for fixed probe inputs
+- Add fallback behavior tests for launcher backend selection
 
 ## Documentation
 - Add screenshots/GIFs to README showing typical usage
-- Add troubleshooting section for common SSH issues
-- Document performance characteristics and scalability limits
+- Add troubleshooting section for common SSH and `nvidia-smi` issues
+- Document performance/scaling characteristics and limits
+- Keep `docs/streaming-feasibility.md` updated if transport model changes
