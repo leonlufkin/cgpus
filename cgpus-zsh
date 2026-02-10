@@ -26,6 +26,7 @@ typeset -gA GROUPS
 typeset -gA POWER_HISTORY
 typeset -gA LAST_TAG
 typeset -g LAST_TAG_CACHE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/cgpus/last_tags.tsv"
+typeset -g ALT_SCREEN_ACTIVE=0
 
 typeset -ga SSH_BASE_OPTS
 typeset -ga SSH_REFRESH_OPTS
@@ -140,6 +141,32 @@ init_ssh_options() {
       -o ControlPath="$control_path"
     )
   fi
+}
+
+enter_alt_screen() {
+  [[ -t 1 ]] || return 1
+  [[ "${TERM:-}" == "dumb" ]] && return 1
+
+  if [[ $ALT_SCREEN_ACTIVE -eq 0 ]]; then
+    printf '\033[?1049h\033[?25l'
+    ALT_SCREEN_ACTIVE=1
+  fi
+
+  return 0
+}
+
+leave_alt_screen() {
+  if [[ $ALT_SCREEN_ACTIVE -eq 1 ]]; then
+    printf '\033[?25h\033[?1049l'
+    ALT_SCREEN_ACTIVE=0
+  fi
+}
+
+cleanup_refresh_exit() {
+  # Keep newline in the alternate buffer so normal scrollback stays untouched.
+  printf "\n"
+  leave_alt_screen
+  exit 0
 }
 
 load_last_tag_cache() {
@@ -673,7 +700,9 @@ run_once() {
 }
 
 run_refresh() {
-  trap 'echo ""; exit 0' INT TERM
+  trap 'cleanup_refresh_exit' INT TERM
+  trap 'leave_alt_screen' EXIT
+  enter_alt_screen >/dev/null 2>&1 || true
 
   local iteration=0
   local first_run=1

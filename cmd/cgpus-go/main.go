@@ -591,6 +591,32 @@ func terminalWidth() int {
 	return 120
 }
 
+func stdoutIsTTY() bool {
+	info, err := os.Stdout.Stat()
+	if err != nil {
+		return false
+	}
+	return (info.Mode() & os.ModeCharDevice) != 0
+}
+
+func enterAlternateScreen() bool {
+	if !stdoutIsTTY() {
+		return false
+	}
+	if strings.EqualFold(os.Getenv("TERM"), "dumb") {
+		return false
+	}
+	fmt.Print("\033[?1049h\033[?25l")
+	return true
+}
+
+func leaveAlternateScreen(enabled bool) {
+	if !enabled {
+		return
+	}
+	fmt.Print("\033[?25h\033[?1049l")
+}
+
 func appendHistory(history map[string][]historyPoint, host string, point historyPoint, maxHistory int) {
 	entries := append(history[host], point)
 	if len(entries) > maxHistory {
@@ -805,6 +831,8 @@ func runRefresh(opts options, nodes []string, state *runtimeState) {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	defer signal.Stop(sigCh)
+	useAltScreen := enterAlternateScreen()
+	defer leaveAlternateScreen(useAltScreen)
 
 	iteration := 0
 	firstRun := true
@@ -813,7 +841,9 @@ func runRefresh(opts options, nodes []string, state *runtimeState) {
 	for {
 		select {
 		case <-sigCh:
-			fmt.Println()
+			if !useAltScreen {
+				fmt.Println()
+			}
 			return
 		default:
 		}
@@ -825,7 +855,9 @@ func runRefresh(opts options, nodes []string, state *runtimeState) {
 				select {
 				case <-sigCh:
 					timer.Stop()
-					fmt.Println()
+					if !useAltScreen {
+						fmt.Println()
+					}
 					return
 				case <-timer.C:
 				}
