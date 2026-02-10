@@ -1,0 +1,43 @@
+#!/usr/bin/env bash
+# Private tag rules for cgpus.
+#
+# Copy to one of:
+#   ~/.config/cgpus/tag-rules.sh
+# or set:
+#   export CGPUS_TAG_RULES_FILE=/path/to/tag-rules.sh
+#
+# Rules are evaluated per host. A tag matches only if EVERY GPU process on the
+# host satisfies `cgpus_tag_rule` for that tag.
+#
+# Inputs passed to cgpus_tag_rule:
+#   $1 = tag
+#   $2 = owner username
+#   $3 = nvidia-smi process name
+#   $4 = full command line (ps args)
+#
+# If exactly one tag matches all processes, that tag is shown.
+# If multiple tags match, cgpus shows MIXED.
+# If no tags match, cgpus shows NONE.
+
+# Add tags in your preferred display order, for example:
+# CGPUS_TAG_ORDER=("TEAM1" "TEAM2")
+CGPUS_TAG_ORDER=()
+
+cgpus_tag_rule() {
+  local tag="$1"
+  local owner="$2"
+  local proc_name="$3"
+  local cmd_line="$4"
+
+  case "$tag" in
+    # TEAM1)
+    #   [[ "$owner" == "alice" ]]
+    #   ;;
+    # TEAM2)
+    #   [[ "$proc_name" == *"trainer"* ]] || [[ "$cmd_line" == *"my_project"* ]]
+    #   ;;
+    *)
+      return 1
+      ;;
+  esac
+}

@@ -26,6 +26,8 @@ typeset -gA GROUPS
 typeset -gA POWER_HISTORY
 typeset -gA LAST_TAG
 typeset -g LAST_TAG_CACHE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/cgpus/last_tags.tsv"
+typeset -g TAG_RULES_FILE="${CGPUS_TAG_RULES_FILE:-${XDG_CONFIG_HOME:-$HOME/.config}/cgpus/tag-rules.sh}"
+typeset -g TAG_RULES_B64=""
 typeset -g ALT_SCREEN_ACTIVE=0
 
 typeset -ga SSH_BASE_OPTS
@@ -143,6 +145,37 @@ init_ssh_options() {
   fi
 }
 
+encode_file_base64() {
+  local input_file="$1"
+  if command -v base64 >/dev/null 2>&1; then
+    base64 < "$input_file" 2>/dev/null | tr -d '\n'
+    return $?
+  fi
+  if command -v openssl >/dev/null 2>&1; then
+    openssl base64 -A < "$input_file" 2>/dev/null
+    return $?
+  fi
+  return 1
+}
+
+load_tag_rules() {
+  local rules_file="$TAG_RULES_FILE"
+  rules_file="${~rules_file}"
+
+  TAG_RULES_B64=""
+  if [[ -z "$rules_file" || ! -r "$rules_file" ]]; then
+    return 0
+  fi
+
+  TAG_RULES_B64="$(encode_file_base64 "$rules_file")" || {
+    echo "Warning: failed to encode tag rules from $rules_file" >&2
+    TAG_RULES_B64=""
+    return 0
+  }
+
+  return 0
+}
+
 enter_alt_screen() {
   [[ -t 1 ]] || return 1
   [[ "${TERM:-}" == "dumb" ]] && return 1
@@ -200,14 +233,13 @@ save_last_tag_cache() {
 }
 
 is_valid_cached_tag() {
-  case "$1" in
-    "*"|"KK"|"RL"|"CM"|"AU"|"DA"|"AR")
-      return 0
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  local tag="$1"
+  [[ -n "$tag" ]] || return 1
+  [[ "$tag" != *$'\t'* ]] || return 1
+  [[ "$tag" != *$'\n'* ]] || return 1
+  [[ "$tag" != *$'\r'* ]] || return 1
+  [[ "$tag" != *[[:space:]]* ]] || return 1
+  return 0
 }
 
 calculate_sparkline_size() {
@@ -288,7 +320,16 @@ probe_host() {
     "${SSH_BASE_OPTS[@]}"
     "${SSH_REFRESH_OPTS[@]}"
     "$host"
-    "ENABLE_CPU=$enable_cpu IDLE_POWER_W=$IDLE_POWER_W IDLE_MEM_MB=$IDLE_MEM_MB IDLE_UTIL_PCT=$IDLE_UTIL_PCT YELLOW_SPARE_MEM_GB=$YELLOW_SPARE_MEM_GB YELLOW_POWER_W=$YELLOW_POWER_W bash -s"
+    env
+    "CGPUS_TAG_RULES_B64=$TAG_RULES_B64"
+    "ENABLE_CPU=$enable_cpu"
+    "IDLE_POWER_W=$IDLE_POWER_W"
+    "IDLE_MEM_MB=$IDLE_MEM_MB"
+    "IDLE_UTIL_PCT=$IDLE_UTIL_PCT"
+    "YELLOW_SPARE_MEM_GB=$YELLOW_SPARE_MEM_GB"
+    "YELLOW_POWER_W=$YELLOW_POWER_W"
+    bash
+    -s
   )
 
   local result
@@ -384,15 +425,22 @@ fi
 process_tag=""
 process_data="$(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader,nounits 2>/dev/null || true)"
 
+if [[ -n "${CGPUS_TAG_RULES_B64:-}" ]] && command -v base64 >/dev/null 2>&1; then
+  decoded_rules="$(
+    printf '%s' "$CGPUS_TAG_RULES_B64" | base64 -d 2>/dev/null ||
+    printf '%s' "$CGPUS_TAG_RULES_B64" | base64 --decode 2>/dev/null ||
+    true
+  )"
+  if [[ -n "$decoded_rules" ]]; then
+    eval "$decoded_rules" >/dev/null 2>&1 || true
+  fi
+fi
+
 if [[ -n "$process_data" ]]; then
-  check_leon=1
-  check_ray=1
-  check_cmoe=1
-  check_au=1
-  check_da=1
-  check_ar=1
-  check_kk=1
   num_processes=0
+  owners=()
+  proc_names=()
+  cmd_lines=()
 
   while IFS=',' read -r pid proc_name; do
     pid="${pid//[[:space:]]/}"
@@ -408,27 +456,42 @@ if [[ -n "$process_data" ]]; then
       cmd_line=""
     fi
 
-    [[ "$owner" != "leon" ]] && check_leon=0
-    [[ "$proc_name" != *"ray::WorkerDict"* && "$owner" != "pritish" ]] && check_ray=0
-    [[ "$cmd_line" != *"cmoe"* ]] && check_cmoe=0
-    [[ "$cmd_line" != *"lisan.al_gaib"* && "$cmd_line" != *"zonos"* ]] && check_au=0
-    [[ "$owner" != "xiao" && "$cmd_line" != *"dataInfra"* ]] && check_da=0
-    [[ "$cmd_line" != *"pretrain_gpt"* ]] && check_ar=0
-    [[ "$owner" != "kamesh" ]] && check_kk=0
+    proc_name="${proc_name//$'\t'/ }"
+    cmd_line="${cmd_line//$'\t'/ }"
+
+    owners+=("$owner")
+    proc_names+=("$proc_name")
+    cmd_lines+=("$cmd_line")
   done <<< "$process_data"
 
   if [[ $num_processes -gt 0 ]]; then
-    tag_count=$((check_leon + check_ray + check_cmoe + check_au + check_da + check_ar + check_kk))
-    if [[ $tag_count -eq 1 ]]; then
-      [[ $check_leon -eq 1 ]] && process_tag="*"
-      [[ $check_ray -eq 1 ]] && process_tag="RL"
-      [[ $check_cmoe -eq 1 ]] && process_tag="CM"
-      [[ $check_au -eq 1 ]] && process_tag="AU"
-      [[ $check_da -eq 1 ]] && process_tag="DA"
-      [[ $check_ar -eq 1 ]] && process_tag="AR"
-      [[ $check_kk -eq 1 ]] && process_tag="KK"
-    elif [[ $tag_count -gt 1 ]]; then
-      process_tag="MIXED"
+    if declare -F cgpus_tag_rule >/dev/null 2>&1 && declare -p CGPUS_TAG_ORDER >/dev/null 2>&1 && [[ ${#CGPUS_TAG_ORDER[@]} -gt 0 ]]; then
+      matched_tags=()
+      for tag in "${CGPUS_TAG_ORDER[@]}"; do
+        [[ -z "$tag" ]] && continue
+
+        all_match=1
+        i=0
+        while [[ $i -lt $num_processes ]]; do
+          if ! cgpus_tag_rule "$tag" "${owners[$i]}" "${proc_names[$i]}" "${cmd_lines[$i]}"; then
+            all_match=0
+            break
+          fi
+          i=$((i + 1))
+        done
+
+        if [[ $all_match -eq 1 ]]; then
+          matched_tags+=("$tag")
+        fi
+      done
+
+      if [[ ${#matched_tags[@]} -eq 1 ]]; then
+        process_tag="${matched_tags[0]}"
+      elif [[ ${#matched_tags[@]} -gt 1 ]]; then
+        process_tag="MIXED"
+      else
+        process_tag="NONE"
+      fi
     else
       process_tag="NONE"
     fi
@@ -668,7 +731,8 @@ render_snapshot() {
     fi
   done
 
-  local -a tag_list=("*" "KK" "RL" "CM" "AU" "DA" "AR")
+  local -a tag_list
+  tag_list=(${(ok)TAG_COUNTS})
   local has_tags=0
   for tag in $tag_list; do
     if [[ ${TAG_COUNTS[$tag]:-0} -gt 0 ]]; then
@@ -729,7 +793,7 @@ run_refresh() {
 
     snapshot="$(render_snapshot "$OPT_GROUP" 1 "$sparkline_size" "$OPT_CPU")"
 
-    printf '\033[2J\033[H'
+    printf '\033[3J\033[2J\033[H'
     print -r -- "$snapshot"
 
     current_time=$(date +%H:%M:%S)
@@ -741,6 +805,7 @@ run_refresh() {
 main() {
   parse_args "$@" || exit 1
   load_groups || exit 1
+  load_tag_rules
   load_last_tag_cache
   init_ssh_options
 

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"os"
@@ -29,6 +30,8 @@ const (
 	colorYellow = "\033[33m"
 	colorReset  = "\033[0m"
 )
+
+var loadedTagRulesB64 string
 
 var remoteProbeScript = `set -o pipefail
 
@@ -121,15 +124,22 @@ fi
 process_tag=""
 process_data="$(nvidia-smi --query-compute-apps=pid,process_name --format=csv,noheader,nounits 2>/dev/null || true)"
 
+if [[ -n "${CGPUS_TAG_RULES_B64:-}" ]] && command -v base64 >/dev/null 2>&1; then
+  decoded_rules="$(
+    printf '%s' "$CGPUS_TAG_RULES_B64" | base64 -d 2>/dev/null ||
+    printf '%s' "$CGPUS_TAG_RULES_B64" | base64 --decode 2>/dev/null ||
+    true
+  )"
+  if [[ -n "$decoded_rules" ]]; then
+    eval "$decoded_rules" >/dev/null 2>&1 || true
+  fi
+fi
+
 if [[ -n "$process_data" ]]; then
-  check_leon=1
-  check_ray=1
-  check_cmoe=1
-  check_au=1
-  check_da=1
-  check_ar=1
-  check_kk=1
   num_processes=0
+  owners=()
+  proc_names=()
+  cmd_lines=()
 
   while IFS=',' read -r pid proc_name; do
     pid="${pid//[[:space:]]/}"
@@ -145,27 +155,42 @@ if [[ -n "$process_data" ]]; then
       cmd_line=""
     fi
 
-    [[ "$owner" != "leon" ]] && check_leon=0
-    [[ "$proc_name" != *"ray::WorkerDict"* && "$owner" != "pritish" ]] && check_ray=0
-    [[ "$cmd_line" != *"cmoe"* ]] && check_cmoe=0
-    [[ "$cmd_line" != *"lisan.al_gaib"* && "$cmd_line" != *"zonos"* ]] && check_au=0
-    [[ "$owner" != "xiao" && "$cmd_line" != *"dataInfra"* ]] && check_da=0
-    [[ "$cmd_line" != *"pretrain_gpt"* ]] && check_ar=0
-    [[ "$owner" != "kamesh" ]] && check_kk=0
+    proc_name="${proc_name//$'\t'/ }"
+    cmd_line="${cmd_line//$'\t'/ }"
+
+    owners+=("$owner")
+    proc_names+=("$proc_name")
+    cmd_lines+=("$cmd_line")
   done <<< "$process_data"
 
   if [[ $num_processes -gt 0 ]]; then
-    tag_count=$((check_leon + check_ray + check_cmoe + check_au + check_da + check_ar + check_kk))
-    if [[ $tag_count -eq 1 ]]; then
-      [[ $check_leon -eq 1 ]] && process_tag="*"
-      [[ $check_ray -eq 1 ]] && process_tag="RL"
-      [[ $check_cmoe -eq 1 ]] && process_tag="CM"
-      [[ $check_au -eq 1 ]] && process_tag="AU"
-      [[ $check_da -eq 1 ]] && process_tag="DA"
-      [[ $check_ar -eq 1 ]] && process_tag="AR"
-      [[ $check_kk -eq 1 ]] && process_tag="KK"
-    elif [[ $tag_count -gt 1 ]]; then
-      process_tag="MIXED"
+    if declare -F cgpus_tag_rule >/dev/null 2>&1 && declare -p CGPUS_TAG_ORDER >/dev/null 2>&1 && [[ ${#CGPUS_TAG_ORDER[@]} -gt 0 ]]; then
+      matched_tags=()
+      for tag in "${CGPUS_TAG_ORDER[@]}"; do
+        [[ -z "$tag" ]] && continue
+
+        all_match=1
+        i=0
+        while [[ $i -lt $num_processes ]]; do
+          if ! cgpus_tag_rule "$tag" "${owners[$i]}" "${proc_names[$i]}" "${cmd_lines[$i]}"; then
+            all_match=0
+            break
+          fi
+          i=$((i + 1))
+        done
+
+        if [[ $all_match -eq 1 ]]; then
+          matched_tags+=("$tag")
+        fi
+      done
+
+      if [[ ${#matched_tags[@]} -eq 1 ]]; then
+        process_tag="${matched_tags[0]}"
+      elif [[ ${#matched_tags[@]} -gt 1 ]]; then
+        process_tag="MIXED"
+      else
+        process_tag="NONE"
+      fi
     else
       process_tag="NONE"
     fi
@@ -337,6 +362,61 @@ func loadGroups() (map[string][]string, error) {
 	return groups, nil
 }
 
+func tagRulesFile() string {
+	if path := strings.TrimSpace(os.Getenv("CGPUS_TAG_RULES_FILE")); path != "" {
+		return path
+	}
+	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
+		return filepath.Join(xdg, "cgpus", "tag-rules.sh")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return ""
+	}
+	return filepath.Join(home, ".config", "cgpus", "tag-rules.sh")
+}
+
+func expandUserPath(path string) string {
+	if path == "" {
+		return ""
+	}
+	if path == "~" {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return home
+	}
+	if strings.HasPrefix(path, "~/") {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return path
+		}
+		return filepath.Join(home, path[2:])
+	}
+	return path
+}
+
+func loadTagRulesBase64() (string, error) {
+	path := expandUserPath(tagRulesFile())
+	if path == "" {
+		return "", nil
+	}
+
+	data, err := os.ReadFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("failed to read tag rules file %s: %w", path, err)
+	}
+	if len(data) == 0 {
+		return "", nil
+	}
+
+	return base64.StdEncoding.EncodeToString(data), nil
+}
+
 func lastTagCacheFile() string {
 	if cacheHome := os.Getenv("XDG_CACHE_HOME"); cacheHome != "" {
 		return filepath.Join(cacheHome, "cgpus", "last_tags.tsv")
@@ -430,12 +510,19 @@ func saveLastTagCache(tags map[string]string) error {
 }
 
 func isValidCachedTag(tag string) bool {
-	switch tag {
-	case "*", "KK", "RL", "CM", "AU", "DA", "AR":
-		return true
-	default:
+	tag = strings.TrimSpace(tag)
+	if tag == "" {
 		return false
 	}
+	if strings.ContainsAny(tag, "\t\r\n") {
+		return false
+	}
+	for _, r := range tag {
+		if r == ' ' {
+			return false
+		}
+	}
+	return true
 }
 
 func boolToInt(v bool) int {
@@ -463,16 +550,20 @@ func buildSSHArgs(refresh bool) []string {
 
 func probeHost(host string, enableCPU bool, refresh bool) hostRecord {
 	sshArgs := buildSSHArgs(refresh)
-	remoteCmd := fmt.Sprintf(
-		"ENABLE_CPU=%d IDLE_POWER_W=%d IDLE_MEM_MB=%d IDLE_UTIL_PCT=%d YELLOW_SPARE_MEM_GB=%d YELLOW_POWER_W=%d bash -s",
-		boolToInt(enableCPU),
-		idlePowerW,
-		idleMemMB,
-		idleUtilPct,
-		yellowSpareMemGB,
-		yellowPowerW,
+	sshArgs = append(
+		sshArgs,
+		host,
+		"env",
+		fmt.Sprintf("CGPUS_TAG_RULES_B64=%s", loadedTagRulesB64),
+		fmt.Sprintf("ENABLE_CPU=%d", boolToInt(enableCPU)),
+		fmt.Sprintf("IDLE_POWER_W=%d", idlePowerW),
+		fmt.Sprintf("IDLE_MEM_MB=%d", idleMemMB),
+		fmt.Sprintf("IDLE_UTIL_PCT=%d", idleUtilPct),
+		fmt.Sprintf("YELLOW_SPARE_MEM_GB=%d", yellowSpareMemGB),
+		fmt.Sprintf("YELLOW_POWER_W=%d", yellowPowerW),
+		"bash",
+		"-s",
 	)
-	sshArgs = append(sshArgs, host, remoteCmd)
 
 	cmd := exec.Command("ssh", sshArgs...)
 	cmd.Stdin = strings.NewReader(remoteProbeScript)
@@ -721,7 +812,6 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 	}
 
 	tagCounts := map[string]int{}
-	tagOrder := []string{"*", "KK", "RL", "CM", "AU", "DA", "AR"}
 
 	var out strings.Builder
 	for i, rec := range results {
@@ -799,15 +889,13 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 		}
 	}
 
-	hasTags := false
-	for _, tag := range tagOrder {
-		if tagCounts[tag] > 0 {
-			hasTags = true
-			break
+	if len(tagCounts) > 0 {
+		tagOrder := make([]string, 0, len(tagCounts))
+		for tag := range tagCounts {
+			tagOrder = append(tagOrder, tag)
 		}
-	}
+		sort.Strings(tagOrder)
 
-	if hasTags {
 		out.WriteString("\n")
 		for _, tag := range tagOrder {
 			if tagCounts[tag] > 0 {
@@ -872,7 +960,7 @@ func runRefresh(opts options, nodes []string, state *runtimeState) {
 		snapshot := renderSnapshot(opts, nodes, state, true, sparklineSize)
 		_ = saveLastTagCache(state.LastTag)
 
-		fmt.Print("\033[2J\033[H")
+		fmt.Print("\033[3J\033[2J\033[H")
 		fmt.Print(snapshot)
 		fmt.Printf("\nRefresh: %ds | Iteration: %d | Time: %s | Press Ctrl+C to exit", opts.Interval, iteration, time.Now().Format("15:04:05"))
 	}
@@ -898,6 +986,12 @@ func main() {
 	if !ok {
 		fmt.Fprintf(os.Stderr, "Error: Group '%s' is not defined.\n", opts.Group)
 		os.Exit(1)
+	}
+
+	loadedTagRulesB64, err = loadTagRulesBase64()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Warning: %s\n", err)
+		loadedTagRulesB64 = ""
 	}
 
 	state := &runtimeState{

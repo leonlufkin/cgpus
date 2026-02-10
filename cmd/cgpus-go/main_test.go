@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"strings"
@@ -119,5 +120,67 @@ func TestLastTagCacheRoundTrip(t *testing.T) {
 	}
 	if _, ok := loaded["host-b"]; ok {
 		t.Fatalf("expected host-b to be omitted for empty tag")
+	}
+}
+
+func TestLoadTagRulesBase64(t *testing.T) {
+	rulesFile := filepath.Join(t.TempDir(), "tag-rules.sh")
+	rulesBody := "CGPUS_TAG_ORDER=(\"AA\")\ncgpus_tag_rule() { return 1; }\n"
+	if err := os.WriteFile(rulesFile, []byte(rulesBody), 0o644); err != nil {
+		t.Fatalf("write rules file: %v", err)
+	}
+
+	t.Setenv("CGPUS_TAG_RULES_FILE", rulesFile)
+	got, err := loadTagRulesBase64()
+	if err != nil {
+		t.Fatalf("loadTagRulesBase64 failed: %v", err)
+	}
+	if got == "" {
+		t.Fatalf("expected non-empty base64 output")
+	}
+
+	decoded, err := base64.StdEncoding.DecodeString(got)
+	if err != nil {
+		t.Fatalf("decode output: %v", err)
+	}
+	if string(decoded) != rulesBody {
+		t.Fatalf("decoded rules mismatch, got %q", string(decoded))
+	}
+}
+
+func TestLoadTagRulesBase64MissingFile(t *testing.T) {
+	t.Setenv("CGPUS_TAG_RULES_FILE", filepath.Join(t.TempDir(), "missing.sh"))
+	got, err := loadTagRulesBase64()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got != "" {
+		t.Fatalf("expected empty rules for missing file, got %q", got)
+	}
+}
+
+func TestIsValidCachedTag(t *testing.T) {
+	if !isValidCachedTag("RL") {
+		t.Fatalf("expected RL to be valid")
+	}
+	if !isValidCachedTag("my-tag") {
+		t.Fatalf("expected arbitrary non-whitespace tag to be valid")
+	}
+	if isValidCachedTag("bad tag") {
+		t.Fatalf("expected tags with spaces to be invalid")
+	}
+	if isValidCachedTag("line\nbreak") {
+		t.Fatalf("expected tags with newlines to be invalid")
+	}
+}
+
+func TestExpandUserPath(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+
+	got := expandUserPath("~/rules.sh")
+	want := filepath.Join(home, "rules.sh")
+	if got != want {
+		t.Fatalf("expected %q, got %q", want, got)
 	}
 }

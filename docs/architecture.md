@@ -40,15 +40,17 @@ Current reasons include:
 
 ## Tag Rules
 
-Tags are assigned only when all observed GPU processes match exactly one rule:
+Tagging rules are private/local and loaded at runtime from:
 
-- `*`: owner is `leon`
-- `KK`: owner is `kamesh`
-- `RL`: process name contains `ray::WorkerDict` or owner is `pritish`
-- `CM`: command line contains `cmoe`
-- `AU`: command line contains `lisan.al_gaib` or `zonos`
-- `DA`: owner is `xiao` or command line contains `dataInfra`
-- `AR`: command line contains `pretrain_gpt`
+- `CGPUS_TAG_RULES_FILE` (if set), else
+- `~/.config/cgpus/tag-rules.sh`
+
+Rule file contract:
+
+- script must be Bash-compatible (executed inside remote `bash`)
+- define `CGPUS_TAG_ORDER=(...)`
+- define `cgpus_tag_rule tag owner proc_name cmd_line`
+- for each candidate tag, `cgpus_tag_rule` must return success for every GPU process on the host to count as a match
 
 If multiple tags match all processes, tag is `MIXED`.
 If no tags match all processes, tag is `NONE`.
