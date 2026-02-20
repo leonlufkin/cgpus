@@ -9,7 +9,7 @@ Monitor NVIDIA GPU availability, utilization, and power across multiple remote h
 - Refresh mode with configurable interval (`-f [INTERVAL]`)
 - Optional CPU and host memory stats (`--cpu`)
 - Sparkline history with color coding
-- Process tagging with persistence (`*`, `KK`, `RL`, `CM`, `AU`, `DA`, `AR`)
+- Private process tagging via local rules file (not committed to repo)
 - Last-tag cache persisted across runs (`~/.cache/cgpus/last_tags.tsv`)
 - Dynamic layout based on terminal width
 - SSH multiplexing in refresh mode to reduce connection overhead
@@ -65,6 +65,14 @@ cp examples/ssh_key_groups.sh.example ~/.ssh/ssh_key_groups.sh
 $EDITOR ~/.ssh/ssh_key_groups.sh
 ```
 
+5. Optional: configure private process tags:
+
+```bash
+mkdir -p ~/.config/cgpus
+cp examples/tag-rules.sh.example ~/.config/cgpus/tag-rules.sh
+$EDITOR ~/.config/cgpus/tag-rules.sh
+```
+
 ## Configuration
 
 Create `~/.ssh/ssh_key_groups.sh`:
@@ -76,6 +84,16 @@ typeset -A GROUPS=(
   test-nodes   "test-gpu-a test-gpu-b"
 )
 ```
+
+Optional private tag rules:
+
+- Default path: `~/.config/cgpus/tag-rules.sh`
+- Override path: `CGPUS_TAG_RULES_FILE=/path/to/tag-rules.sh`
+- Contract:
+  - file should be Bash-compatible (`cgpus` executes it in remote `bash`)
+  - define `CGPUS_TAG_ORDER=(...)`
+  - define `cgpus_tag_rule tag owner proc_name cmd_line`
+  - a tag is applied only when every GPU process on that host matches exactly one tag rule
 
 ## Backend Selection
 

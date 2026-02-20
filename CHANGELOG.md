@@ -7,20 +7,13 @@ All notable changes to this project will be documented in this file.
 ### Added
 - TODO.md documenting planned improvements and feature ideas
 - Contributing section in README.md linking to TODO.md
-- General process tagging system with configurable rules based on owner and process name
-  - Tag `*` when all GPU processes are owned by "leon"
-  - Tag `KK` when all GPU processes are owned by "kamesh"
-  - Tag `RL` when all GPU processes contain "ray::WorkerDict" OR owned by "pritish"
-  - Tag `CM` when all GPU processes contain "cmoe" in command line
-  - Tag `AU` when all GPU processes contain "lisan.al_gaib" or "zonos" in command line
-  - Tag `DA` when all GPU processes are owned by "xiao" OR contain "dataInfra" in command line
-  - Tag `AR` when all GPU processes contain "pretrain_gpt" in command line
-  - Tags persist until replaced by a new tag (idle GPUs show last tag)
-  - Tags cleared when processes are mixed (multiple different tags)
-  - Tags only applied when ALL processes match exactly one criterion
-  - Tag count summary displayed at bottom (only counts current tags, not persisting)
-  - Individual GPU IDs in parentheses now colored by status (red for idle, yellow for underutilized)
-  - Entire row still colored based on worst status (red if any idle, yellow if only underutilized)
+- Process tagging system with persistence and per-host cache
+  - Rules are now loaded from a private local config file (`~/.config/cgpus/tag-rules.sh` by default)
+  - Public repo no longer hardcodes user/workload-specific tag logic
+  - `MIXED` and `NONE` semantics unchanged
+  - Tag summary now renders dynamically from observed tags
+  - Individual GPU IDs in parentheses remain colorized by status
+  - Row color remains based on worst status (red if any idle, yellow if only underutilized)
 - `cgpus-zsh` backend with modularized probe/render flow
 - `cgpus-go` backend (`cmd/cgpus-go`) with tests
 - Launcher backend selection via `CGPUS_BACKEND=auto|zsh|go`
