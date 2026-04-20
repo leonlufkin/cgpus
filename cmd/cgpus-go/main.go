@@ -8,11 +8,13 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unsafe"
 )
 
 const (
@@ -163,7 +165,7 @@ if [[ -n "$process_data" ]]; then
       [[ $check_au -eq 1 ]] && process_tag="AU"
       [[ $check_da -eq 1 ]] && process_tag="DA"
       [[ $check_ar -eq 1 ]] && process_tag="AR"
-      [[ $check_kk -eq 1 ]] && process_tag="KK"
+      [[ $check_kk -eq 1 ]] && process_tag="†"
     elif [[ $tag_count -gt 1 ]]; then
       process_tag="MIXED"
     else
@@ -431,7 +433,7 @@ func saveLastTagCache(tags map[string]string) error {
 
 func isValidCachedTag(tag string) bool {
 	switch tag {
-	case "*", "KK", "RL", "CM", "AU", "DA", "AR":
+	case "*", "†", "RL", "CM", "AU", "DA", "AR":
 		return true
 	default:
 		return false
@@ -560,12 +562,13 @@ func parseProbeOutput(host string, line string) hostRecord {
 
 func calculateSparklineSize(enableCPU bool) int {
 	termWidth := terminalWidth()
-	fixedWidth := 61
+	// Row body width: host prefix (7) + formatted GPU cols (35) + yellow section (12) + leading space before sparkline (1) = 55
+	fixedWidth := 55
 	if enableCPU {
-		// CPU+host-mem section estimate: "  %3s%%  used/total TB" ~= 19 chars
-		fixedWidth += 19
+		// CPU+host-mem section: "  %3s%%  %-*s" with maxCPUMemLen=8 → 16 chars
+		fixedWidth += 16
 	}
-	maxSize := termWidth - fixedWidth - 4
+	maxSize := termWidth - fixedWidth - 1
 	if maxSize > 20 {
 		maxSize = 20
 	}
@@ -576,6 +579,9 @@ func calculateSparklineSize(enableCPU bool) int {
 }
 
 func terminalWidth() int {
+	if n := ttyWidth(); n > 0 {
+		return n
+	}
 	if cols := os.Getenv("COLUMNS"); cols != "" {
 		if n, err := strconv.Atoi(cols); err == nil && n > 0 {
 			return n
@@ -589,6 +595,47 @@ func terminalWidth() int {
 		}
 	}
 	return 120
+}
+
+// ttyWidth asks the controlling terminal for its current column count via
+// TIOCGWINSZ. Works regardless of how stdout is redirected and reflects the
+// live resized size, which env/tput can miss.
+func ttyWidth() int {
+	var ioctlReq uintptr
+	switch runtime.GOOS {
+	case "linux":
+		ioctlReq = 0x5413
+	case "darwin", "freebsd", "netbsd", "openbsd", "dragonfly":
+		ioctlReq = 0x40087468
+	default:
+		return 0
+	}
+
+	type winsize struct {
+		Row, Col, Xpixel, Ypixel uint16
+	}
+
+	query := func(fd uintptr) int {
+		var ws winsize
+		_, _, errno := syscall.Syscall(syscall.SYS_IOCTL, fd, ioctlReq, uintptr(unsafe.Pointer(&ws)))
+		if errno != 0 || ws.Col == 0 {
+			return 0
+		}
+		return int(ws.Col)
+	}
+
+	if f, err := os.Open("/dev/tty"); err == nil {
+		defer f.Close()
+		if n := query(f.Fd()); n > 0 {
+			return n
+		}
+	}
+	for _, fd := range []uintptr{uintptr(syscall.Stderr), uintptr(syscall.Stdout), uintptr(syscall.Stdin)} {
+		if n := query(fd); n > 0 {
+			return n
+		}
+	}
+	return 0
 }
 
 func appendHistory(history map[string][]historyPoint, host string, point historyPoint, maxHistory int) {
@@ -695,7 +742,7 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 	}
 
 	tagCounts := map[string]int{}
-	tagOrder := []string{"*", "KK", "RL", "CM", "AU", "DA", "AR"}
+	tagOrder := []string{"*", "†", "RL", "CM", "AU", "DA", "AR"}
 
 	var out strings.Builder
 	for i, rec := range results {

@@ -174,7 +174,7 @@ save_last_tag_cache() {
 
 is_valid_cached_tag() {
   case "$1" in
-    "*"|"KK"|"RL"|"CM"|"AU"|"DA"|"AR")
+    "*"|"†"|"RL"|"CM"|"AU"|"DA"|"AR")
       return 0
       ;;
     *)
@@ -185,15 +185,25 @@ is_valid_cached_tag() {
 
 calculate_sparkline_size() {
   local enable_cpu="${1:-0}"
-  local term_width=${COLUMNS:-$(tput cols 2>/dev/null || echo 120)}
-  local fixed_width=61
-
-  if [[ $enable_cpu -eq 1 ]]; then
-    # CPU+host-mem section estimate: "  %3s%%  used/total TB" ~= 19 chars
-    fixed_width=$((fixed_width + 19))
+  # Prefer the controlling tty (stty reads the kernel's window size directly,
+  # so it reflects live resizes and ignores stale $COLUMNS).
+  local term_width=""
+  if [[ -r /dev/tty ]]; then
+    term_width=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
+  fi
+  if [[ -z "$term_width" || "$term_width" -le 0 ]]; then
+    term_width=${COLUMNS:-$(tput cols 2>/dev/null || echo 120)}
   fi
 
-  local max_size=$((term_width - fixed_width - 4))
+  # Row body width: host prefix (7) + formatted GPU cols (35) + yellow section (12) + leading space before sparkline (1) = 55
+  local fixed_width=55
+
+  if [[ $enable_cpu -eq 1 ]]; then
+    # CPU+host-mem section: "  %3s%%  %-*s" with maxCPUMemLen=8 → 16 chars
+    fixed_width=$((fixed_width + 16))
+  fi
+
+  local max_size=$((term_width - fixed_width - 1))
   [[ $max_size -gt 20 ]] && max_size=20
   [[ $max_size -lt 5 ]] && max_size=5
   echo "$max_size"
@@ -399,7 +409,7 @@ if [[ -n "$process_data" ]]; then
       [[ $check_au -eq 1 ]] && process_tag="AU"
       [[ $check_da -eq 1 ]] && process_tag="DA"
       [[ $check_ar -eq 1 ]] && process_tag="AR"
-      [[ $check_kk -eq 1 ]] && process_tag="KK"
+      [[ $check_kk -eq 1 ]] && process_tag="†"
     elif [[ $tag_count -gt 1 ]]; then
       process_tag="MIXED"
     else
@@ -641,7 +651,7 @@ render_snapshot() {
     fi
   done
 
-  local -a tag_list=("*" "KK" "RL" "CM" "AU" "DA" "AR")
+  local -a tag_list=("*" "†" "RL" "CM" "AU" "DA" "AR")
   local has_tags=0
   for tag in $tag_list; do
     if [[ ${TAG_COUNTS[$tag]:-0} -gt 0 ]]; then
