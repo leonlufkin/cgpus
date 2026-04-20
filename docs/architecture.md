@@ -43,7 +43,7 @@ Current reasons include:
 Tags are assigned only when all observed GPU processes match exactly one rule:
 
 - `*`: owner is `leon`
-- `KK`: owner is `kamesh`
+- `†`: owner is `kamesh`
 - `RL`: process name contains `ray::WorkerDict` or owner is `pritish`
 - `CM`: command line contains `cmoe`
 - `AU`: command line contains `lisan.al_gaib` or `zonos`

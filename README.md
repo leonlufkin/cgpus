@@ -9,7 +9,7 @@ Monitor NVIDIA GPU availability, utilization, and power across multiple remote h
 - Refresh mode with configurable interval (`-f [INTERVAL]`)
 - Optional CPU and host memory stats (`--cpu`)
 - Sparkline history with color coding
-- Process tagging with persistence (`*`, `KK`, `RL`, `CM`, `AU`, `DA`, `AR`)
+- Process tagging with persistence (`*`, `†`, `RL`, `CM`, `AU`, `DA`, `AR`)
 - Last-tag cache persisted across runs (`~/.cache/cgpus/last_tags.tsv`)
 - Dynamic layout based on terminal width
 - SSH multiplexing in refresh mode to reduce connection overhead
