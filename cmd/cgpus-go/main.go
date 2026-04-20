@@ -24,11 +24,13 @@ const (
 	idleUtilPct            = 5
 	yellowSpareMemGB       = 40
 	yellowPowerW           = 250
+	idleGreenDuration      = 30 * time.Minute
 )
 
 const (
 	colorRed    = "\033[31m"
 	colorYellow = "\033[33m"
+	colorGreen  = "\033[32m"
 	colorReset  = "\033[0m"
 )
 
@@ -63,12 +65,36 @@ NF >= 5 {
 
   if (power < idle_power && mem_used < idle_mem && util < idle_util) {
     idle_count++
+    idle[gpu_index] = 1
   }
 
   spare_mem_gpu = (mem_total - mem_used) / 1024
   if (spare_mem_gpu > yellow_spare || power < yellow_power) {
     yellow[gpu_index] = 1
   }
+}
+function compress_ranges(set, n,    out, rs, re, i) {
+  out = ""
+  rs = -1
+  re = -1
+  for (i = 0; i < n; i++) {
+    if (set[i] == 1) {
+      if (rs == -1) { rs = i; re = i }
+      else if (i == re + 1) { re = i }
+      else {
+        if (out != "") out = out ","
+        if (rs == re) out = out rs
+        else out = out rs "-" re
+        rs = i; re = i
+      }
+    }
+  }
+  if (rs != -1) {
+    if (out != "") out = out ","
+    if (rs == re) out = out rs
+    else out = out rs "-" re
+  }
+  return out
 }
 END {
   if (gpu_count == 0) {
@@ -80,39 +106,10 @@ END {
   mem_used_gb = (total_mem_used / 1024) / gpu_count
   mem_total_gb = (total_mem_total / 1024) / gpu_count
 
-  yellow_str = ""
-  range_start = -1
-  range_end = -1
-  for (i = 0; i < gpu_count; i++) {
-    if (yellow[i] == 1) {
-      if (range_start == -1) {
-        range_start = i
-        range_end = i
-      } else if (i == range_end + 1) {
-        range_end = i
-      } else {
-        if (yellow_str != "") yellow_str = yellow_str ","
-        if (range_start == range_end) {
-          yellow_str = yellow_str range_start
-        } else {
-          yellow_str = yellow_str range_start "-" range_end
-        }
-        range_start = i
-        range_end = i
-      }
-    }
-  }
+  yellow_str = compress_ranges(yellow, gpu_count)
+  idle_str = compress_ranges(idle, gpu_count)
 
-  if (range_start != -1) {
-    if (yellow_str != "") yellow_str = yellow_str ","
-    if (range_start == range_end) {
-      yellow_str = yellow_str range_start
-    } else {
-      yellow_str = yellow_str range_start "-" range_end
-    }
-  }
-
-  printf "%d\t%d\t%.0f\t%.1f\t%.1f\t%.0f\t%s", idle_count, gpu_count, avg_util, avg_power, mem_used_gb, mem_total_gb, yellow_str
+  printf "%d\t%d\t%.0f\t%.1f\t%.1f\t%.0f\t%s\t%s", idle_count, gpu_count, avg_util, avg_power, mem_used_gb, mem_total_gb, yellow_str, idle_str
 }')"
 
 if [[ -z "$gpu_stats" ]]; then
@@ -234,6 +231,9 @@ type historyPoint struct {
 type runtimeState struct {
 	PowerHistory map[string][]historyPoint
 	LastTag      map[string]string
+	// IdleSince[host][gpuIdx] = first time that GPU was observed idle in the
+	// current run. Cleared when the GPU stops being idle or the host errors.
+	IdleSince map[string]map[int]time.Time
 }
 
 type hostRecord struct {
@@ -247,6 +247,7 @@ type hostRecord struct {
 	MemUsed        float64
 	MemTotal       float64
 	Yellow         string
+	IdleIDs        string
 	RawTag         string
 	CPUPct         string
 	HostMemUsedTB  string
@@ -514,7 +515,11 @@ func parseProbeOutput(host string, line string) hostRecord {
 		return hostRecord{Host: host, State: "ERR", Reason: "parse_error"}
 	}
 
-	for len(parts) < 12 {
+	// Layout (tab-separated): OK, idle_count, total, util, power, mem_used,
+	// mem_total, yellow_str, idle_str, raw_tag, cpu_pct, host_mem_used,
+	// host_mem_total. idle_str is newer; older probes that omit it are still
+	// accepted (IdleIDs is then empty and no GPU ever goes green).
+	for len(parts) < 13 {
 		parts = append(parts, "")
 	}
 
@@ -553,10 +558,11 @@ func parseProbeOutput(host string, line string) hostRecord {
 		MemUsed:        memUsed,
 		MemTotal:       memTotal,
 		Yellow:         parts[7],
-		RawTag:         parts[8],
-		CPUPct:         parts[9],
-		HostMemUsedTB:  parts[10],
-		HostMemTotalTB: parts[11],
+		IdleIDs:        parts[8],
+		RawTag:         parts[9],
+		CPUPct:         parts[10],
+		HostMemUsedTB:  parts[11],
+		HostMemTotalTB: parts[12],
 	}
 }
 
@@ -638,6 +644,156 @@ func ttyWidth() int {
 	return 0
 }
 
+// parseRangeList expands "0-1,3,6-7" into [0,1,3,6,7]. Returns nil for empty.
+func parseRangeList(s string) []int {
+	if s == "" {
+		return nil
+	}
+	var ids []int
+	for _, part := range strings.Split(s, ",") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			continue
+		}
+		if dash := strings.Index(part, "-"); dash >= 0 {
+			start, err1 := strconv.Atoi(part[:dash])
+			end, err2 := strconv.Atoi(part[dash+1:])
+			if err1 != nil || err2 != nil || start > end {
+				continue
+			}
+			for i := start; i <= end; i++ {
+				ids = append(ids, i)
+			}
+		} else {
+			n, err := strconv.Atoi(part)
+			if err != nil {
+				continue
+			}
+			ids = append(ids, n)
+		}
+	}
+	return ids
+}
+
+// updateIdleSince stamps newly-idle GPUs with `now` and drops any that are no
+// longer idle, so state.IdleSince[host] always matches the current idle set.
+func updateIdleSince(state *runtimeState, host string, idleIDs []int, now time.Time) {
+	if state.IdleSince == nil {
+		state.IdleSince = map[string]map[int]time.Time{}
+	}
+	tracked, ok := state.IdleSince[host]
+	if !ok {
+		tracked = map[int]time.Time{}
+		state.IdleSince[host] = tracked
+	}
+	current := make(map[int]bool, len(idleIDs))
+	for _, id := range idleIDs {
+		current[id] = true
+		if _, seen := tracked[id]; !seen {
+			tracked[id] = now
+		}
+	}
+	for id := range tracked {
+		if !current[id] {
+			delete(tracked, id)
+		}
+	}
+}
+
+// greenGPUs returns the set of GPUs on host that have been idle for at least
+// threshold. Callers should have called updateIdleSince with the current idle
+// set for this tick first.
+func greenGPUs(state *runtimeState, host string, now time.Time, threshold time.Duration) map[int]bool {
+	tracked := state.IdleSince[host]
+	if len(tracked) == 0 {
+		return nil
+	}
+	green := map[int]bool{}
+	for id, since := range tracked {
+		if now.Sub(since) >= threshold {
+			green[id] = true
+		}
+	}
+	return green
+}
+
+// renderYellowSection builds "(…)" for the GPU-ID list, wrapping any GPU in
+// greenSet with colorGreen + surroundingColor (so the outer row color resumes
+// correctly after the green escape). When the whole row is already being
+// painted green by the caller, pass an empty greenSet to skip nested coloring.
+func renderYellowSection(yellowStr string, greenSet map[int]bool, surroundingColor string) string {
+	if yellowStr == "" {
+		return ""
+	}
+	hasGreen := false
+	for _, id := range parseRangeList(yellowStr) {
+		if greenSet[id] {
+			hasGreen = true
+			break
+		}
+	}
+	if !hasGreen {
+		return "(" + yellowStr + ")"
+	}
+	tokens := strings.Split(yellowStr, ",")
+	parts := make([]string, 0, len(tokens))
+	for _, tok := range tokens {
+		parts = append(parts, colorizeRangeToken(tok, greenSet, surroundingColor))
+	}
+	return "(" + strings.Join(parts, ",") + ")"
+}
+
+func colorizeRangeToken(tok string, greenSet map[int]bool, surroundingColor string) string {
+	if dash := strings.Index(tok, "-"); dash >= 0 {
+		start, err1 := strconv.Atoi(tok[:dash])
+		end, err2 := strconv.Atoi(tok[dash+1:])
+		if err1 != nil || err2 != nil || start > end {
+			return tok
+		}
+		allGreen := true
+		anyGreen := false
+		for i := start; i <= end; i++ {
+			if greenSet[i] {
+				anyGreen = true
+			} else {
+				allGreen = false
+			}
+		}
+		if allGreen {
+			return wrapGreen(tok, surroundingColor)
+		}
+		if !anyGreen {
+			return tok
+		}
+		pieces := make([]string, 0, end-start+1)
+		for i := start; i <= end; i++ {
+			s := strconv.Itoa(i)
+			if greenSet[i] {
+				s = wrapGreen(s, surroundingColor)
+			}
+			pieces = append(pieces, s)
+		}
+		return strings.Join(pieces, ",")
+	}
+	n, err := strconv.Atoi(tok)
+	if err != nil {
+		return tok
+	}
+	if greenSet[n] {
+		return wrapGreen(tok, surroundingColor)
+	}
+	return tok
+}
+
+// wrapGreen paints text green, then restores the outer row color (or fully
+// resets if no outer color is in effect) so later characters don't leak green.
+func wrapGreen(text string, surroundingColor string) string {
+	if surroundingColor == "" {
+		return colorGreen + text + colorReset
+	}
+	return colorGreen + text + surroundingColor
+}
+
 func appendHistory(history map[string][]historyPoint, host string, point historyPoint, maxHistory int) {
 	entries := append(history[host], point)
 	if len(entries) > maxHistory {
@@ -669,6 +825,10 @@ func generateSparkline(entries []historyPoint) string {
 			b.WriteString(colorReset)
 		case "yellow":
 			b.WriteString(colorYellow)
+			b.WriteString(block)
+			b.WriteString(colorReset)
+		case "green":
+			b.WriteString(colorGreen)
 			b.WriteString(block)
 			b.WriteString(colorReset)
 		default:
@@ -744,10 +904,14 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 	tagCounts := map[string]int{}
 	tagOrder := []string{"*", "†", "RL", "CM", "AU", "DA", "AR"}
 
+	now := time.Now()
 	var out strings.Builder
 	for i, rec := range results {
 		host := nodes[i]
 		if rec.State != "OK" {
+			// Probe failed; idle observations become untrustworthy, so drop any
+			// accumulated idle_since for this host and restart on recovery.
+			delete(state.IdleSince, host)
 			if enableHistory {
 				appendHistory(state.PowerHistory, host, historyPoint{Missing: true}, maxHistory)
 			}
@@ -766,6 +930,11 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 			continue
 		}
 
+		idleIDs := parseRangeList(rec.IdleIDs)
+		updateIdleSince(state, host, idleIDs, now)
+		greenSet := greenGPUs(state, host, now, idleGreenDuration)
+		allGreen := rec.Total > 0 && len(greenSet) == rec.Total
+
 		processTag := applyTagSemantics(host, rec.RawTag, state, tagCounts)
 		availInfo := fmt.Sprintf("%d/%d", rec.Idle, rec.Total)
 		if processTag != "" {
@@ -773,11 +942,41 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 		}
 
 		formatted := fmt.Sprintf("%-7s %4.0f%% %7.1fW  %5.1f/%2.0f GB", availInfo, rec.Util, rec.Power, rec.MemUsed, rec.MemTotal)
-		yellowSection := ""
-		if rec.Yellow != "" {
-			yellowSection = "(" + rec.Yellow + ")"
+
+		rowColor := ""
+		histColor := "none"
+		switch {
+		case allGreen:
+			rowColor = colorGreen
+			histColor = "green"
+		case rec.Idle > 0:
+			rowColor = colorRed
+			histColor = "red"
+		case rec.Yellow != "":
+			rowColor = colorYellow
+			histColor = "yellow"
 		}
-		formatted += "  " + fmt.Sprintf("%-*s", maxYellowLen, yellowSection)
+
+		// When the row is uniformly green, skip nested per-GPU green wrappers
+		// (they'd be redundant and just add escape bytes).
+		var yellowSection string
+		if allGreen || len(greenSet) == 0 {
+			yellowSection = ""
+			if rec.Yellow != "" {
+				yellowSection = "(" + rec.Yellow + ")"
+			}
+		} else {
+			yellowSection = renderYellowSection(rec.Yellow, greenSet, rowColor)
+		}
+		visibleYellowLen := 0
+		if rec.Yellow != "" {
+			visibleYellowLen = len(rec.Yellow) + 2
+		}
+		yellowPad := maxYellowLen - visibleYellowLen
+		if yellowPad < 0 {
+			yellowPad = 0
+		}
+		formatted += "  " + yellowSection + strings.Repeat(" ", yellowPad)
 
 		if opts.CPU {
 			cpu := rec.CPUPct
@@ -794,16 +993,6 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 			}
 			cpuMem := fmt.Sprintf("%s/%s TB", hostMemUsed, hostMemTotal)
 			formatted += fmt.Sprintf("  %3s%%  %-*s", cpu, maxCPUMemLen, cpuMem)
-		}
-
-		rowColor := ""
-		histColor := "none"
-		if rec.Idle > 0 {
-			rowColor = colorRed
-			histColor = "red"
-		} else if rec.Yellow != "" {
-			rowColor = colorYellow
-			histColor = "yellow"
 		}
 
 		sparkline := ""
@@ -918,6 +1107,7 @@ func main() {
 	state := &runtimeState{
 		PowerHistory: map[string][]historyPoint{},
 		LastTag:      map[string]string{},
+		IdleSince:    map[string]map[int]time.Time{},
 	}
 
 	if cachedTags, err := loadLastTagCache(); err == nil {

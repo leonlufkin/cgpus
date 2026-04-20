@@ -11,9 +11,11 @@ readonly IDLE_MEM_MB=1024
 readonly IDLE_UTIL_PCT=5
 readonly YELLOW_SPARE_MEM_GB=40
 readonly YELLOW_POWER_W=250
+readonly IDLE_GREEN_SECONDS=1800
 
 readonly RED=$'\033[31m'
 readonly YELLOW=$'\033[33m'
+readonly GREEN=$'\033[32m'
 readonly RESET=$'\033[0m'
 readonly USAGE_NAME="cgpus"
 
@@ -25,6 +27,10 @@ typeset -g OPT_GROUP=""
 typeset -gA GROUPS
 typeset -gA POWER_HISTORY
 typeset -gA LAST_TAG
+# IDLE_SINCE keys are "host:gpu_idx", values are unix epoch seconds. Dropped
+# when a GPU stops being idle or its host errors, so the set always equals the
+# current idle set.
+typeset -gA IDLE_SINCE
 typeset -g LAST_TAG_CACHE_FILE="${XDG_CACHE_HOME:-$HOME/.cache}/cgpus/last_tags.tsv"
 
 typeset -ga SSH_BASE_OPTS
@@ -253,6 +259,8 @@ generate_sparkline() {
         sparkline+="${RED}${block}${RESET}"
       elif [[ "$clr" == "yellow" ]]; then
         sparkline+="${YELLOW}${block}${RESET}"
+      elif [[ "$clr" == "green" ]]; then
+        sparkline+="${GREEN}${block}${RESET}"
       else
         sparkline+="$block"
       fi
@@ -260,6 +268,153 @@ generate_sparkline() {
   done
 
   echo "$sparkline"
+}
+
+# Expand "0-1,3,6-7" to "0 1 3 6 7" (space-separated on stdout).
+parse_range_list() {
+  local s="$1"
+  [[ -z "$s" ]] && return
+  local tok start end i first=1
+  for tok in ${(s:,:)s}; do
+    [[ -z "$tok" ]] && continue
+    if [[ "$tok" == *-* ]]; then
+      start="${tok%-*}"
+      end="${tok#*-}"
+      [[ ! "$start" =~ '^[0-9]+$' || ! "$end" =~ '^[0-9]+$' ]] && continue
+      (( start > end )) && continue
+      for ((i = start; i <= end; i++)); do
+        (( first )) && first=0 || printf ' '
+        printf '%s' "$i"
+      done
+    else
+      [[ ! "$tok" =~ '^[0-9]+$' ]] && continue
+      (( first )) && first=0 || printf ' '
+      printf '%s' "$tok"
+    fi
+  done
+}
+
+# Stamp newly-idle GPUs with $now; drop any for this host that aren't in the
+# current idle list so the map always matches the current idle set.
+update_idle_since() {
+  local host="$1"
+  local -a idle_ids
+  idle_ids=(${=2})
+  local now="$3"
+  typeset -A current
+  current=()
+  local id key
+  for id in $idle_ids; do
+    current[$id]=1
+    key="${host}:${id}"
+    if [[ -z "${IDLE_SINCE[$key]:-}" ]]; then
+      IDLE_SINCE[$key]="$now"
+    fi
+  done
+  for key in ${(k)IDLE_SINCE}; do
+    [[ "${key%%:*}" != "$host" ]] && continue
+    id="${key##*:}"
+    [[ -z "${current[$id]:-}" ]] && unset "IDLE_SINCE[$key]"
+  done
+}
+
+clear_idle_since_for_host() {
+  local host="$1"
+  local key
+  for key in ${(k)IDLE_SINCE}; do
+    [[ "${key%%:*}" == "$host" ]] && unset "IDLE_SINCE[$key]"
+  done
+}
+
+# Prints green GPU ids for a host (space-separated) on stdout.
+green_gpus_for_host() {
+  local host="$1"
+  local now="$2"
+  local threshold="$3"
+  local key since id first=1
+  for key in ${(k)IDLE_SINCE}; do
+    [[ "${key%%:*}" != "$host" ]] && continue
+    since="${IDLE_SINCE[$key]}"
+    id="${key##*:}"
+    if (( now - since >= threshold )); then
+      (( first )) && first=0 || printf ' '
+      printf '%s' "$id"
+    fi
+  done
+}
+
+# render_yellow_section yellow_str green_ids row_color
+# Emits "(...)"  with green-highlighted ids nested inside the row_color so the
+# outer color resumes after the green escape (or colorReset if no outer color).
+render_yellow_section() {
+  local yellow_str="$1"
+  local green_ids="$2"
+  local row_color="$3"
+  [[ -z "$yellow_str" ]] && return
+
+  typeset -A green
+  green=()
+  local id
+  for id in ${=green_ids}; do
+    green[$id]=1
+  done
+
+  local any_green=0
+  for id in $(parse_range_list "$yellow_str"); do
+    if [[ -n "${green[$id]:-}" ]]; then
+      any_green=1
+      break
+    fi
+  done
+
+  if (( any_green == 0 )); then
+    printf '(%s)' "$yellow_str"
+    return
+  fi
+
+  local resume="${row_color:-$RESET}"
+  local output="" tok first=1 start end i all_g any_g expanded first_e
+  for tok in ${(s:,:)yellow_str}; do
+    (( first )) && first=0 || output+=","
+    if [[ "$tok" == *-* ]]; then
+      start="${tok%-*}"
+      end="${tok#*-}"
+      all_g=1
+      any_g=0
+      for ((i = start; i <= end; i++)); do
+        if [[ -n "${green[$i]:-}" ]]; then
+          any_g=1
+        else
+          all_g=0
+        fi
+      done
+      if (( all_g )); then
+        output+="${GREEN}${tok}${resume}"
+      elif (( any_g == 0 )); then
+        output+="$tok"
+      else
+        expanded=""
+        first_e=1
+        for ((i = start; i <= end; i++)); do
+          (( first_e )) && first_e=0 || expanded+=","
+          if [[ -n "${green[$i]:-}" ]]; then
+            expanded+="${GREEN}${i}${resume}"
+          else
+            expanded+="$i"
+          fi
+        done
+        output+="$expanded"
+      fi
+    else
+      if [[ -n "${green[$tok]:-}" ]]; then
+        output+="${GREEN}${tok}${resume}"
+      else
+        output+="$tok"
+      fi
+    fi
+  done
+
+  printf '(%s)' "$output"
 }
 
 probe_host() {
@@ -307,12 +462,36 @@ NF >= 5 {
 
   if (power < idle_power && mem_used < idle_mem && util < idle_util) {
     idle_count++
+    idle[gpu_index] = 1
   }
 
   spare_mem_gpu = (mem_total - mem_used) / 1024
   if (spare_mem_gpu > yellow_spare || power < yellow_power) {
     yellow[gpu_index] = 1
   }
+}
+function compress_ranges(set, n,    out, rs, re, i) {
+  out = ""
+  rs = -1
+  re = -1
+  for (i = 0; i < n; i++) {
+    if (set[i] == 1) {
+      if (rs == -1) { rs = i; re = i }
+      else if (i == re + 1) { re = i }
+      else {
+        if (out != "") out = out ","
+        if (rs == re) out = out rs
+        else out = out rs "-" re
+        rs = i; re = i
+      }
+    }
+  }
+  if (rs != -1) {
+    if (out != "") out = out ","
+    if (rs == re) out = out rs
+    else out = out rs "-" re
+  }
+  return out
 }
 END {
   if (gpu_count == 0) {
@@ -324,39 +503,10 @@ END {
   mem_used_gb = (total_mem_used / 1024) / gpu_count
   mem_total_gb = (total_mem_total / 1024) / gpu_count
 
-  yellow_str = ""
-  range_start = -1
-  range_end = -1
-  for (i = 0; i < gpu_count; i++) {
-    if (yellow[i] == 1) {
-      if (range_start == -1) {
-        range_start = i
-        range_end = i
-      } else if (i == range_end + 1) {
-        range_end = i
-      } else {
-        if (yellow_str != "") yellow_str = yellow_str ","
-        if (range_start == range_end) {
-          yellow_str = yellow_str range_start
-        } else {
-          yellow_str = yellow_str range_start "-" range_end
-        }
-        range_start = i
-        range_end = i
-      }
-    }
-  }
+  yellow_str = compress_ranges(yellow, gpu_count)
+  idle_str = compress_ranges(idle, gpu_count)
 
-  if (range_start != -1) {
-    if (yellow_str != "") yellow_str = yellow_str ","
-    if (range_start == range_end) {
-      yellow_str = yellow_str range_start
-    } else {
-      yellow_str = yellow_str range_start "-" range_end
-    }
-  }
-
-  printf "%d|%d|%.0f|%.1f|%.1f|%.0f|%s", idle_count, gpu_count, avg_util, avg_power, mem_used_gb, mem_total_gb, yellow_str
+  printf "%d|%d|%.0f|%.1f|%.1f|%.0f|%s|%s", idle_count, gpu_count, avg_util, avg_power, mem_used_gb, mem_total_gb, yellow_str, idle_str
 }')"
 
 if [[ -z "$gpu_stats" ]]; then
@@ -505,6 +655,7 @@ render_snapshot() {
   typeset -A REC_MEM_USED
   typeset -A REC_MEM_TOTAL
   typeset -A REC_YELLOW
+  typeset -A REC_IDLE_IDS
   typeset -A REC_RAW_TAG
   typeset -A REC_CPU
   typeset -A REC_HOST_MEM_USED
@@ -520,8 +671,8 @@ render_snapshot() {
       rec='ERR|empty'
     fi
 
-    local state idle total util power mem_used mem_total yellow raw_tag cpu_pct host_mem_used_tb host_mem_total_tb
-    IFS='|' read -r state idle total util power mem_used mem_total yellow raw_tag cpu_pct host_mem_used_tb host_mem_total_tb <<< "$rec"
+    local state idle total util power mem_used mem_total yellow idle_ids raw_tag cpu_pct host_mem_used_tb host_mem_total_tb
+    IFS='|' read -r state idle total util power mem_used mem_total yellow idle_ids raw_tag cpu_pct host_mem_used_tb host_mem_total_tb <<< "$rec"
 
     REC_STATE[$host]="$state"
     if [[ "$state" == "OK" ]]; then
@@ -532,6 +683,7 @@ render_snapshot() {
       REC_MEM_USED[$host]="$mem_used"
       REC_MEM_TOTAL[$host]="$mem_total"
       REC_YELLOW[$host]="$yellow"
+      REC_IDLE_IDS[$host]="$idle_ids"
       REC_RAW_TAG[$host]="$raw_tag"
       REC_CPU[$host]="$cpu_pct"
       REC_HOST_MEM_USED[$host]="$host_mem_used_tb"
@@ -560,10 +712,14 @@ render_snapshot() {
 
   typeset -A TAG_COUNTS
 
+  local now=$(date +%s)
+
   for host in $nodes; do
     local state="${REC_STATE[$host]:-ERR}"
 
     if [[ "$state" != "OK" ]]; then
+      # Probe failed; drop idle_since for this host so recovery restarts timers.
+      clear_idle_since_for_host "$host"
       if [[ $enable_history -eq 1 ]]; then
         append_history "$host" "-1" "$max_history"
       fi
@@ -589,10 +745,21 @@ render_snapshot() {
     local mem_used="${REC_MEM_USED[$host]}"
     local mem_total="${REC_MEM_TOTAL[$host]}"
     local yellow="${REC_YELLOW[$host]}"
+    local idle_ids_str="${REC_IDLE_IDS[$host]}"
     local raw_tag="${REC_RAW_TAG[$host]}"
     local cpu_pct="${REC_CPU[$host]}"
     local host_mem_used_tb="${REC_HOST_MEM_USED[$host]}"
     local host_mem_total_tb="${REC_HOST_MEM_TOTAL[$host]}"
+
+    local idle_ids_space="$(parse_range_list "$idle_ids_str")"
+    update_idle_since "$host" "$idle_ids_space" "$now"
+    local green_ids="$(green_gpus_for_host "$host" "$now" "$IDLE_GREEN_SECONDS")"
+    local -a green_arr
+    green_arr=(${=green_ids})
+    local all_green=0
+    if [[ -n "$total" && "$total" -gt 0 && ${#green_arr} -eq "$total" ]]; then
+      all_green=1
+    fi
 
     local process_tag="$raw_tag"
     if [[ "$process_tag" == "MIXED" || "$process_tag" == "NONE" ]]; then
@@ -613,11 +780,32 @@ render_snapshot() {
     local formatted
     formatted=$(printf "%-7s %4.0f%% %7.1fW  %5.1f/%2.0f GB" "$avail_info" "$util" "$power" "$mem_used" "$mem_total")
 
-    local yellow_section=""
-    if [[ -n "$yellow" ]]; then
-      yellow_section="($yellow)"
+    local row_color=""
+    local hist_color="none"
+    if (( all_green )); then
+      row_color="$GREEN"
+      hist_color="green"
+    elif [[ "$idle" =~ '^[0-9]+$' ]] && (( idle > 0 )); then
+      row_color="$RED"
+      hist_color="red"
+    elif [[ -n "$yellow" ]]; then
+      row_color="$YELLOW"
+      hist_color="yellow"
     fi
-    formatted+="  $(printf "%-${max_gpu_id_len}s" "$yellow_section")"
+
+    local yellow_section=""
+    if (( all_green )) || [[ -z "$green_ids" ]]; then
+      [[ -n "$yellow" ]] && yellow_section="($yellow)"
+    else
+      yellow_section="$(render_yellow_section "$yellow" "$green_ids" "$row_color")"
+    fi
+    # Pad to visible width (len(yellow)+2 when non-empty) instead of string
+    # length, since yellow_section may now contain ANSI escapes.
+    local visible_yellow_len=0
+    [[ -n "$yellow" ]] && visible_yellow_len=$((${#yellow} + 2))
+    local yellow_pad=$((max_gpu_id_len - visible_yellow_len))
+    (( yellow_pad < 0 )) && yellow_pad=0
+    formatted+="  ${yellow_section}$(printf "%${yellow_pad}s" "")"
 
     if [[ $enable_cpu -eq 1 ]]; then
       [[ -z "$cpu_pct" ]] && cpu_pct="0"
@@ -625,16 +813,6 @@ render_snapshot() {
       [[ -z "$host_mem_total_tb" ]] && host_mem_total_tb="0.0"
       local cpu_mem="${host_mem_used_tb}/${host_mem_total_tb} TB"
       formatted+="  $(printf '%3s%%' "$cpu_pct")  $(printf "%-${max_cpu_mem_len}s" "$cpu_mem")"
-    fi
-
-    local row_color=""
-    local hist_color="none"
-    if [[ "$idle" =~ '^[0-9]+$' ]] && (( idle > 0 )); then
-      row_color="$RED"
-      hist_color="red"
-    elif [[ -n "$yellow" ]]; then
-      row_color="$YELLOW"
-      hist_color="yellow"
     fi
 
     local sparkline_str=""
