@@ -838,83 +838,6 @@ func greenGPUs(state *runtimeState, host string, now time.Time, threshold time.D
 	return green
 }
 
-// renderYellowSection builds "(…)" for the GPU-ID list, wrapping any GPU in
-// greenSet with colorGreen + surroundingColor (so the outer row color resumes
-// correctly after the green escape). When the whole row is already being
-// painted green by the caller, pass an empty greenSet to skip nested coloring.
-func renderYellowSection(yellowStr string, greenSet map[int]bool, surroundingColor string) string {
-	if yellowStr == "" {
-		return ""
-	}
-	hasGreen := false
-	for _, id := range parseRangeList(yellowStr) {
-		if greenSet[id] {
-			hasGreen = true
-			break
-		}
-	}
-	if !hasGreen {
-		return "(" + yellowStr + ")"
-	}
-	tokens := strings.Split(yellowStr, ",")
-	parts := make([]string, 0, len(tokens))
-	for _, tok := range tokens {
-		parts = append(parts, colorizeRangeToken(tok, greenSet, surroundingColor))
-	}
-	return "(" + strings.Join(parts, ",") + ")"
-}
-
-func colorizeRangeToken(tok string, greenSet map[int]bool, surroundingColor string) string {
-	if dash := strings.Index(tok, "-"); dash >= 0 {
-		start, err1 := strconv.Atoi(tok[:dash])
-		end, err2 := strconv.Atoi(tok[dash+1:])
-		if err1 != nil || err2 != nil || start > end {
-			return tok
-		}
-		allGreen := true
-		anyGreen := false
-		for i := start; i <= end; i++ {
-			if greenSet[i] {
-				anyGreen = true
-			} else {
-				allGreen = false
-			}
-		}
-		if allGreen {
-			return wrapGreen(tok, surroundingColor)
-		}
-		if !anyGreen {
-			return tok
-		}
-		pieces := make([]string, 0, end-start+1)
-		for i := start; i <= end; i++ {
-			s := strconv.Itoa(i)
-			if greenSet[i] {
-				s = wrapGreen(s, surroundingColor)
-			}
-			pieces = append(pieces, s)
-		}
-		return strings.Join(pieces, ",")
-	}
-	n, err := strconv.Atoi(tok)
-	if err != nil {
-		return tok
-	}
-	if greenSet[n] {
-		return wrapGreen(tok, surroundingColor)
-	}
-	return tok
-}
-
-// wrapGreen paints text green, then restores the outer row color (or fully
-// resets if no outer color is in effect) so later characters don't leak green.
-func wrapGreen(text string, surroundingColor string) string {
-	if surroundingColor == "" {
-		return colorGreen + text + colorReset
-	}
-	return colorGreen + text + surroundingColor
-}
-
 func appendHistory(history map[string][]historyPoint, host string, point historyPoint, maxHistory int) {
 	entries := append(history[host], point)
 	if len(entries) > maxHistory {
@@ -1055,8 +978,7 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 
 		idleIDs := parseRangeList(rec.IdleIDs)
 		updateIdleSince(state, host, idleIDs, now)
-		greenSet := greenGPUs(state, host, now, idleGreenDuration)
-		allGreen := rec.Total > 0 && len(greenSet) == rec.Total
+		hasGreen := len(greenGPUs(state, host, now, idleGreenDuration)) > 0
 
 		processTag := applyTagSemantics(host, rec.RawTag, state, tagCounts)
 		availInfo := fmt.Sprintf("%d/%d", rec.Idle, rec.Total)
@@ -1069,7 +991,7 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 		rowColor := ""
 		histColor := "none"
 		switch {
-		case allGreen:
+		case hasGreen:
 			rowColor = colorGreen
 			histColor = "green"
 		case rec.Idle > 0:
@@ -1080,16 +1002,9 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 			histColor = "yellow"
 		}
 
-		// When the row is uniformly green, skip nested per-GPU green wrappers
-		// (they'd be redundant and just add escape bytes).
-		var yellowSection string
-		if allGreen || len(greenSet) == 0 {
-			yellowSection = ""
-			if rec.Yellow != "" {
-				yellowSection = "(" + rec.Yellow + ")"
-			}
-		} else {
-			yellowSection = renderYellowSection(rec.Yellow, greenSet, rowColor)
+		yellowSection := ""
+		if rec.Yellow != "" {
+			yellowSection = "(" + rec.Yellow + ")"
 		}
 		visibleYellowLen := 0
 		if rec.Yellow != "" {

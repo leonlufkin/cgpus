@@ -108,36 +108,6 @@ func TestUpdateIdleSinceAndGreenGPUs(t *testing.T) {
 	}
 }
 
-func TestRenderYellowSection(t *testing.T) {
-	// No green → unchanged.
-	if got := renderYellowSection("0-1,3", map[int]bool{}, colorRed); got != "(0-1,3)" {
-		t.Fatalf("unexpected: %q", got)
-	}
-
-	// Single green id inside a range expands the range, green wraps only the id,
-	// and the surrounding row color is re-entered after green (not a reset).
-	got := renderYellowSection("0-1,3,6-7", map[int]bool{3: true}, colorRed)
-	wantContains := colorGreen + "3" + colorRed
-	if !strings.Contains(got, wantContains) {
-		t.Fatalf("expected %q embedded in %q", wantContains, got)
-	}
-	if !strings.Contains(got, "0-1") || !strings.Contains(got, "6-7") {
-		t.Fatalf("expected untouched ranges to remain compressed: %q", got)
-	}
-
-	// Entire range green → range stays compressed, wrapped once.
-	got = renderYellowSection("6-7", map[int]bool{6: true, 7: true}, colorRed)
-	if got != "("+colorGreen+"6-7"+colorRed+")" {
-		t.Fatalf("expected compressed green range, got %q", got)
-	}
-
-	// No surrounding color → green wrappers close with colorReset.
-	got = renderYellowSection("3", map[int]bool{3: true}, "")
-	if got != "("+colorGreen+"3"+colorReset+")" {
-		t.Fatalf("expected green+reset with no outer color, got %q", got)
-	}
-}
-
 func TestApplyTagSemantics(t *testing.T) {
 	state := &runtimeState{
 		PowerHistory: map[string][]historyPoint{},
