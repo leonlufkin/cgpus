@@ -218,6 +218,7 @@ printf 'OK\t%s\t%s\t%s\t%s\t%s\n' "$gpu_stats" "$process_tag" "$cpu_pct" "$mem_u
 type options struct {
 	CPU      bool
 	Refresh  bool
+	Capture  bool
 	Interval int
 	Group    string
 }
@@ -255,10 +256,11 @@ type hostRecord struct {
 }
 
 func printUsage() {
-	fmt.Println("Usage: cgpus [--cpu] [-f [INTERVAL]] GROUP")
+	fmt.Println("Usage: cgpus [--cpu] [-f [INTERVAL] | --capture] GROUP")
 	fmt.Println("  --cpu         Show CPU load and host memory usage")
 	fmt.Println("  -f            Enable refresh mode (default: 30s interval)")
 	fmt.Println("  -f INTERVAL   Enable refresh mode with custom interval (seconds)")
+	fmt.Println("  --capture     Print a single plain-text snapshot and exit")
 	fmt.Println()
 	fmt.Println("Examples:")
 	fmt.Println("  cgpus zyphra")
@@ -266,6 +268,7 @@ func printUsage() {
 	fmt.Println("  cgpus -f zyphra")
 	fmt.Println("  cgpus -f 5 zyphra")
 	fmt.Println("  cgpus --cpu -f 5 zyphra")
+	fmt.Println("  cgpus --capture zyphra")
 }
 
 func parseArgs(args []string) (options, error) {
@@ -276,6 +279,8 @@ func parseArgs(args []string) (options, error) {
 		switch arg {
 		case "--cpu":
 			opts.CPU = true
+		case "--capture":
+			opts.Capture = true
 		case "-f":
 			opts.Refresh = true
 			if i+1 < len(args) {
@@ -301,6 +306,9 @@ func parseArgs(args []string) (options, error) {
 	}
 	if opts.Interval < 1 {
 		return opts, errors.New("refresh interval must be at least 1 second")
+	}
+	if opts.Capture && opts.Refresh {
+		return opts, errors.New("--capture cannot be combined with -f")
 	}
 
 	return opts, nil
@@ -439,6 +447,95 @@ func isValidCachedTag(tag string) bool {
 	default:
 		return false
 	}
+}
+
+func idleSinceCacheFile() string {
+	if cacheHome := os.Getenv("XDG_CACHE_HOME"); cacheHome != "" {
+		return filepath.Join(cacheHome, "cgpus", "idle_since.tsv")
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "idle_since.tsv"
+	}
+	return filepath.Join(home, ".cache", "cgpus", "idle_since.tsv")
+}
+
+func loadIdleSinceCache() (map[string]map[int]time.Time, error) {
+	f, err := os.Open(idleSinceCacheFile())
+	if err != nil {
+		if os.IsNotExist(err) {
+			return map[string]map[int]time.Time{}, nil
+		}
+		return nil, err
+	}
+	defer f.Close()
+
+	result := map[string]map[int]time.Time{}
+	scanner := bufio.NewScanner(f)
+	for scanner.Scan() {
+		parts := strings.Split(strings.TrimSpace(scanner.Text()), "\t")
+		if len(parts) != 3 {
+			continue
+		}
+		host := strings.TrimSpace(parts[0])
+		gpu, err1 := strconv.Atoi(parts[1])
+		unix, err2 := strconv.ParseInt(parts[2], 10, 64)
+		if host == "" || err1 != nil || err2 != nil {
+			continue
+		}
+		if result[host] == nil {
+			result[host] = map[int]time.Time{}
+		}
+		result[host][gpu] = time.Unix(unix, 0)
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}
+
+func saveIdleSinceCache(since map[string]map[int]time.Time) error {
+	cacheFile := idleSinceCacheFile()
+	cacheDir := filepath.Dir(cacheFile)
+	if err := os.MkdirAll(cacheDir, 0o755); err != nil {
+		return err
+	}
+
+	tmpFile, err := os.CreateTemp(cacheDir, "idle_since.*.tmp")
+	if err != nil {
+		return err
+	}
+	tmpName := tmpFile.Name()
+	defer os.Remove(tmpName)
+
+	hosts := make([]string, 0, len(since))
+	for host := range since {
+		hosts = append(hosts, host)
+	}
+	sort.Strings(hosts)
+
+	w := bufio.NewWriter(tmpFile)
+	for _, host := range hosts {
+		gpus := make([]int, 0, len(since[host]))
+		for gpu := range since[host] {
+			gpus = append(gpus, gpu)
+		}
+		sort.Ints(gpus)
+		for _, gpu := range gpus {
+			if _, err := fmt.Fprintf(w, "%s\t%d\t%d\n", host, gpu, since[host][gpu].Unix()); err != nil {
+				_ = tmpFile.Close()
+				return err
+			}
+		}
+	}
+	if err := w.Flush(); err != nil {
+		_ = tmpFile.Close()
+		return err
+	}
+	if err := tmpFile.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmpName, cacheFile)
 }
 
 func boolToInt(v bool) int {
@@ -852,26 +949,28 @@ func applyTagSemantics(host string, rawTag string, state *runtimeState, tagCount
 	}
 }
 
-func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHistory bool, maxHistory int) string {
+func probeAll(opts options, nodes []string) []hostRecord {
 	type indexed struct {
 		Index  int
 		Record hostRecord
 	}
-
 	results := make([]hostRecord, len(nodes))
 	ch := make(chan indexed, len(nodes))
-
 	for i, host := range nodes {
 		go func(idx int, h string) {
 			ch <- indexed{Index: idx, Record: probeHost(h, opts.CPU, opts.Refresh)}
 		}(i, host)
 	}
-
 	for i := 0; i < len(nodes); i++ {
 		item := <-ch
 		results[item.Index] = item.Record
 	}
 	close(ch)
+	return results
+}
+
+func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHistory bool, maxHistory int) string {
+	results := probeAll(opts, nodes)
 
 	maxYellowLen := 10
 	maxCPUMemLen := 8
@@ -1030,10 +1129,187 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 	return out.String()
 }
 
+func formatIdleDuration(d time.Duration) string {
+	if d < 0 {
+		d = 0
+	}
+	if d < time.Minute {
+		return fmt.Sprintf("%ds", int(d.Seconds()))
+	}
+	if d < time.Hour {
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	}
+	hours := int(d.Hours())
+	mins := int(d.Minutes()) % 60
+	if mins == 0 {
+		return fmt.Sprintf("%dh", hours)
+	}
+	return fmt.Sprintf("%dh%dm", hours, mins)
+}
+
+// renderPlain emits one unaligned-padded line per host: plain ASCII,
+// key=value fields, suitable for piping into agents or logs. Reuses the same
+// state-update path (parseRangeList, updateIdleSince, applyTagSemantics) as
+// the TUI so cache semantics stay identical.
+func renderPlain(opts options, records []hostRecord, state *runtimeState, now time.Time) string {
+	type rowData struct {
+		Host    string
+		OK      bool
+		Reason  string
+		Idle    string
+		IdleIDs string
+		IdleFor string
+		Power   string
+		CPU     string
+		Mem     string
+		Spare   string
+		Tag     string
+	}
+
+	tagCounts := map[string]int{}
+	rows := make([]rowData, 0, len(records))
+
+	for _, rec := range records {
+		r := rowData{Host: rec.Host}
+		if rec.State != "OK" {
+			r.Reason = rec.Reason
+			if r.Reason == "" {
+				r.Reason = "unknown"
+			}
+			delete(state.IdleSince, rec.Host)
+			rows = append(rows, r)
+			continue
+		}
+
+		idleIDs := parseRangeList(rec.IdleIDs)
+		updateIdleSince(state, rec.Host, idleIDs, now)
+		tracked := state.IdleSince[rec.Host]
+
+		var minDur time.Duration = -1
+		for _, id := range idleIDs {
+			if since, ok := tracked[id]; ok {
+				d := now.Sub(since)
+				if minDur < 0 || d < minDur {
+					minDur = d
+				}
+			}
+		}
+
+		r.OK = true
+		r.Idle = fmt.Sprintf("%d/%d", rec.Idle, rec.Total)
+		r.IdleIDs = rec.IdleIDs
+		if len(idleIDs) > 0 && minDur >= 0 {
+			r.IdleFor = formatIdleDuration(minDur)
+		}
+		r.Power = fmt.Sprintf("%.0fW", rec.Power)
+		r.Spare = rec.Yellow
+		r.Tag = applyTagSemantics(rec.Host, rec.RawTag, state, tagCounts)
+		if opts.CPU {
+			cpu := rec.CPUPct
+			if cpu == "" {
+				cpu = "0"
+			}
+			r.CPU = cpu + "%"
+			memUsed := rec.HostMemUsedTB
+			if memUsed == "" {
+				memUsed = "0.0"
+			}
+			memTotal := rec.HostMemTotalTB
+			if memTotal == "" {
+				memTotal = "0.0"
+			}
+			r.Mem = memUsed + "/" + memTotal + "TB"
+		}
+		rows = append(rows, r)
+	}
+
+	dash := func(s string) string {
+		if s == "" {
+			return "-"
+		}
+		return s
+	}
+
+	wHost, wIdle, wIDs, wFor, wPow, wCPU, wMem, wSpare, wTag := 0, 5, 4, 4, 6, 4, 4, 6, 4
+	for _, r := range rows {
+		if l := len(r.Host) + 1; l > wHost {
+			wHost = l
+		}
+		if !r.OK {
+			continue
+		}
+		if l := len("idle=") + len(r.Idle); l > wIdle {
+			wIdle = l
+		}
+		if l := len("ids=") + len(dash(r.IdleIDs)); l > wIDs {
+			wIDs = l
+		}
+		if l := len("for=") + len(dash(r.IdleFor)); l > wFor {
+			wFor = l
+		}
+		if l := len("power=") + len(r.Power); l > wPow {
+			wPow = l
+		}
+		if opts.CPU {
+			if l := len("cpu=") + len(r.CPU); l > wCPU {
+				wCPU = l
+			}
+			if l := len("mem=") + len(r.Mem); l > wMem {
+				wMem = l
+			}
+		}
+		if l := len("spare=") + len(dash(r.Spare)); l > wSpare {
+			wSpare = l
+		}
+		if l := len("tag=") + len(dash(r.Tag)); l > wTag {
+			wTag = l
+		}
+	}
+
+	var out strings.Builder
+	for _, r := range rows {
+		hostCol := fmt.Sprintf("%-*s", wHost, r.Host+":")
+		if !r.OK {
+			out.WriteString(fmt.Sprintf("%s  ERR   %s\n", hostCol, r.Reason))
+			continue
+		}
+		parts := []string{
+			hostCol,
+			"OK ",
+			fmt.Sprintf("%-*s", wIdle, "idle="+r.Idle),
+			fmt.Sprintf("%-*s", wIDs, "ids="+dash(r.IdleIDs)),
+			fmt.Sprintf("%-*s", wFor, "for="+dash(r.IdleFor)),
+			fmt.Sprintf("%-*s", wPow, "power="+r.Power),
+		}
+		if opts.CPU {
+			parts = append(parts,
+				fmt.Sprintf("%-*s", wCPU, "cpu="+r.CPU),
+				fmt.Sprintf("%-*s", wMem, "mem="+r.Mem),
+			)
+		}
+		parts = append(parts,
+			fmt.Sprintf("%-*s", wSpare, "spare="+dash(r.Spare)),
+			fmt.Sprintf("%-*s", wTag, "tag="+dash(r.Tag)),
+		)
+		out.WriteString(strings.TrimRight(strings.Join(parts, "  "), " "))
+		out.WriteString("\n")
+	}
+	return out.String()
+}
+
 func runOnce(opts options, nodes []string, state *runtimeState) {
 	sparklineSize := calculateSparklineSize(opts.CPU)
 	snapshot := renderSnapshot(opts, nodes, state, false, sparklineSize)
 	_ = saveLastTagCache(state.LastTag)
+	_ = saveIdleSinceCache(state.IdleSince)
+	fmt.Print(snapshot)
+}
+
+func runCapture(opts options, nodes []string, state *runtimeState) {
+	records := probeAll(opts, nodes)
+	snapshot := renderPlain(opts, records, state, time.Now())
+	_ = saveLastTagCache(state.LastTag)
+	_ = saveIdleSinceCache(state.IdleSince)
 	fmt.Print(snapshot)
 }
 
@@ -1075,6 +1351,7 @@ func runRefresh(opts options, nodes []string, state *runtimeState) {
 		sparklineSize := calculateSparklineSize(opts.CPU)
 		snapshot := renderSnapshot(opts, nodes, state, true, sparklineSize)
 		_ = saveLastTagCache(state.LastTag)
+		_ = saveIdleSinceCache(state.IdleSince)
 
 		fmt.Print("\033[2J\033[H")
 		fmt.Print(snapshot)
@@ -1115,10 +1392,16 @@ func main() {
 			state.LastTag[host] = tag
 		}
 	}
+	if cachedIdle, err := loadIdleSinceCache(); err == nil {
+		state.IdleSince = cachedIdle
+	}
 
-	if opts.Refresh {
+	switch {
+	case opts.Capture:
+		runCapture(opts, nodes, state)
+	case opts.Refresh:
 		runRefresh(opts, nodes, state)
-	} else {
+	default:
 		runOnce(opts, nodes, state)
 	}
 }

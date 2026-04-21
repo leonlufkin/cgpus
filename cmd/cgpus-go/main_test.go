@@ -17,6 +17,9 @@ func TestParseArgs(t *testing.T) {
 		{name: "group only", args: []string{"cluster"}},
 		{name: "cpu and refresh", args: []string{"--cpu", "-f", "5", "cluster"}},
 		{name: "refresh default interval", args: []string{"-f", "cluster"}},
+		{name: "capture", args: []string{"--capture", "cluster"}},
+		{name: "capture with cpu", args: []string{"--capture", "--cpu", "cluster"}},
+		{name: "capture and refresh conflict", args: []string{"--capture", "-f", "cluster"}, wantErr: true},
 		{name: "missing group", args: []string{"--cpu"}, wantErr: true},
 		{name: "unknown flag", args: []string{"--wat", "cluster"}, wantErr: true},
 	}
@@ -174,6 +177,97 @@ func TestGenerateSparkline(t *testing.T) {
 	}
 	if !strings.Contains(spark, "\033[33m") || !strings.Contains(spark, "\033[31m") {
 		t.Fatalf("expected colorized sparkline segments")
+	}
+}
+
+func TestIdleSinceCacheRoundTrip(t *testing.T) {
+	cacheRoot := t.TempDir()
+	t.Setenv("XDG_CACHE_HOME", cacheRoot)
+
+	t0 := time.Unix(1_700_000_000, 0)
+	in := map[string]map[int]time.Time{
+		"host-a": {0: t0, 3: t0.Add(5 * time.Minute)},
+		"host-b": {7: t0.Add(time.Hour)},
+	}
+	if err := saveIdleSinceCache(in); err != nil {
+		t.Fatalf("saveIdleSinceCache failed: %v", err)
+	}
+
+	cacheFile := filepath.Join(cacheRoot, "cgpus", "idle_since.tsv")
+	if _, err := os.Stat(cacheFile); err != nil {
+		t.Fatalf("expected cache file to exist: %v", err)
+	}
+
+	loaded, err := loadIdleSinceCache()
+	if err != nil {
+		t.Fatalf("loadIdleSinceCache failed: %v", err)
+	}
+	if loaded["host-a"][0] != t0 {
+		t.Fatalf("expected host-a[0]=t0, got %v", loaded["host-a"][0])
+	}
+	if loaded["host-a"][3] != t0.Add(5*time.Minute) {
+		t.Fatalf("expected host-a[3]=t0+5m, got %v", loaded["host-a"][3])
+	}
+	if loaded["host-b"][7] != t0.Add(time.Hour) {
+		t.Fatalf("expected host-b[7]=t0+1h, got %v", loaded["host-b"][7])
+	}
+}
+
+func TestRenderPlain(t *testing.T) {
+	t0 := time.Unix(1_700_000_000, 0)
+	state := &runtimeState{
+		PowerHistory: map[string][]historyPoint{},
+		LastTag:      map[string]string{},
+		IdleSince: map[string]map[int]time.Time{
+			"vp11": {5: t0, 6: t0.Add(-30 * time.Minute)},
+		},
+	}
+	records := []hostRecord{
+		{Host: "vp11", State: "OK", Idle: 2, Total: 8, Power: 262, Yellow: "2-6", IdleIDs: "5-6", RawTag: "RL"},
+		{Host: "vp12", State: "ERR", Reason: "ssh_fail"},
+	}
+	now := t0.Add(45 * time.Minute)
+
+	out := renderPlain(options{}, records, state, now)
+	if !strings.Contains(out, "vp11:") || !strings.Contains(out, "OK") {
+		t.Fatalf("expected vp11 OK line, got:\n%s", out)
+	}
+	if !strings.Contains(out, "idle=2/8") || !strings.Contains(out, "ids=5-6") {
+		t.Fatalf("expected idle fields, got:\n%s", out)
+	}
+	// min idle duration is 45m (gpu 5 stamped at t0, seen again at now).
+	if !strings.Contains(out, "for=45m") {
+		t.Fatalf("expected for=45m (min of 45m,75m), got:\n%s", out)
+	}
+	if !strings.Contains(out, "tag=RL") || !strings.Contains(out, "spare=2-6") {
+		t.Fatalf("expected tag/spare fields, got:\n%s", out)
+	}
+	if !strings.Contains(out, "vp12:") || !strings.Contains(out, "ERR") || !strings.Contains(out, "ssh_fail") {
+		t.Fatalf("expected vp12 ERR line, got:\n%s", out)
+	}
+	// No ANSI escapes in capture output.
+	if strings.Contains(out, "\033[") {
+		t.Fatalf("expected no ANSI escapes in plain output, got:\n%s", out)
+	}
+}
+
+func TestFormatIdleDuration(t *testing.T) {
+	cases := []struct {
+		d    time.Duration
+		want string
+	}{
+		{0, "0s"},
+		{30 * time.Second, "30s"},
+		{5 * time.Minute, "5m"},
+		{59 * time.Minute, "59m"},
+		{time.Hour, "1h"},
+		{90 * time.Minute, "1h30m"},
+		{-time.Second, "0s"},
+	}
+	for _, tc := range cases {
+		if got := formatIdleDuration(tc.d); got != tc.want {
+			t.Fatalf("formatIdleDuration(%v) = %q, want %q", tc.d, got, tc.want)
+		}
 	}
 }
 
