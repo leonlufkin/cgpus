@@ -1,10 +1,16 @@
-#!/bin/zsh
+#!/bin/bash
 # cgpus go backend launcher
 
-setopt pipefail
+set -o pipefail
 
-script_path="${0:A}"
-script_dir="${script_path:h}"
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  link_dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$link_dir/$src"
+done
+script_dir="$(cd -P "$(dirname "$src")" && pwd)"
+
 compiled_backend="$script_dir/.bin/cgpus-go"
 source_main="$script_dir/cmd/cgpus-go/main.go"
 source_mod="$script_dir/go.mod"

@@ -1,12 +1,19 @@
-#!/bin/zsh
+#!/bin/bash
 # cgpus launcher
 # Select backend via CGPUS_BACKEND=auto|zsh|go (default: auto)
 
-setopt pipefail
+set -o pipefail
 
 backend="${CGPUS_BACKEND:-auto}"
-script_path="${0:A}"
-script_dir="${script_path:h}"
+
+src="${BASH_SOURCE[0]}"
+while [ -L "$src" ]; do
+  link_dir="$(cd -P "$(dirname "$src")" && pwd)"
+  src="$(readlink "$src")"
+  [[ "$src" != /* ]] && src="$link_dir/$src"
+done
+script_dir="$(cd -P "$(dirname "$src")" && pwd)"
+
 zsh_backend="$script_dir/cgpus-zsh"
 go_backend="$script_dir/cgpus-go"
 go_compiled_backend="$script_dir/.bin/cgpus-go"
@@ -14,6 +21,10 @@ go_compiled_backend="$script_dir/.bin/cgpus-go"
 run_zsh() {
   if [[ ! -x "$zsh_backend" ]]; then
     echo "zsh backend not found or not executable: $zsh_backend" >&2
+    return 1
+  fi
+  if ! command -v zsh >/dev/null 2>&1; then
+    echo "zsh backend requires zsh to be installed" >&2
     return 1
   fi
   exec "$zsh_backend" "$@"

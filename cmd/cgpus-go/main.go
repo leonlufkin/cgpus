@@ -315,10 +315,34 @@ func parseArgs(args []string) (options, error) {
 }
 
 func loadGroups() (map[string][]string, error) {
-	script := `source "$HOME/.ssh/ssh_key_groups.sh" >/dev/null 2>&1 || exit 1; for k v in ${(kv)GROUPS}; do print -r -- "$k"$'\t'"$v"; done`
-	cmd := exec.Command("zsh", "-lc", script)
-	out, err := cmd.Output()
-	if err != nil {
+	// zsh emits pairs via ${(kv)GROUPS}; bash 4+ via "${!GROUPS[@]}".
+	// Try zsh first (matches the original syntax users wrote their groups file
+	// in) and fall back to bash so the tool works on clusters without zsh.
+	attempts := []struct {
+		shell, script string
+	}{
+		{"zsh", `source "$HOME/.ssh/ssh_key_groups.sh" >/dev/null 2>&1 || exit 1; for k v in ${(kv)GROUPS}; do print -r -- "$k"$'\t'"$v"; done`},
+		{"bash", `source "$HOME/.ssh/ssh_key_groups.sh" >/dev/null 2>&1 || exit 1; for k in "${!GROUPS[@]}"; do printf '%s\t%s\n' "$k" "${GROUPS[$k]}"; done`},
+	}
+	var out []byte
+	var lastErr error
+	for _, a := range attempts {
+		if _, err := exec.LookPath(a.shell); err != nil {
+			continue
+		}
+		cmd := exec.Command(a.shell, "-lc", a.script)
+		o, err := cmd.Output()
+		if err == nil && len(strings.TrimSpace(string(o))) > 0 {
+			out = o
+			lastErr = nil
+			break
+		}
+		lastErr = err
+	}
+	if len(out) == 0 {
+		if lastErr != nil {
+			return nil, fmt.Errorf("failed to load groups from ~/.ssh/ssh_key_groups.sh: %v", lastErr)
+		}
 		return nil, fmt.Errorf("failed to load groups from ~/.ssh/ssh_key_groups.sh")
 	}
 
