@@ -126,6 +126,30 @@ func TestProbeHostTimesOut(t *testing.T) {
 	}
 }
 
+func TestProbeHostDoesNotWaitForDetachedStdoutHolder(t *testing.T) {
+	t.Setenv("CGPUS_PROBE_TIMEOUT", "2s")
+
+	oldCommandContext := commandContext
+	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperHoldStdoutCommand", "--")
+		cmd.Env = append(os.Environ(), "CGPUS_HELPER_HOLD_STDOUT=1")
+		return cmd
+	}
+	defer func() {
+		commandContext = oldCommandContext
+	}()
+
+	start := time.Now()
+	rec := probeHost("mux-host", true, true)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("probeHost waited for detached stdout holder: %v", elapsed)
+	}
+
+	if rec.Host != "mux-host" || rec.State != "OK" || rec.Idle != 1 || rec.Total != 2 || rec.RawTag != "RL" {
+		t.Fatalf("unexpected probe result: %+v", rec)
+	}
+}
+
 func TestParseProbeOutputOK(t *testing.T) {
 	line := "OK\t2\t8\t25\t262.5\t36.3\t80\t2-6\t5-6\tRL\t8\t0.4\t2"
 	rec := parseProbeOutput("vp11", line)
@@ -368,5 +392,20 @@ func TestHelperSleepCommand(t *testing.T) {
 		return
 	}
 	time.Sleep(10 * time.Second)
+	os.Exit(0)
+}
+
+func TestHelperHoldStdoutCommand(t *testing.T) {
+	if os.Getenv("CGPUS_HELPER_HOLD_STDOUT") != "1" {
+		return
+	}
+	_, _ = os.Stdout.WriteString("OK\t1\t2\t3\t4\t5\t6\t0\t0\tRL\t\t\t\n")
+
+	cmd := exec.Command("sleep", "5")
+	cmd.Stdout = os.Stdout
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		os.Exit(1)
+	}
 	os.Exit(0)
 }

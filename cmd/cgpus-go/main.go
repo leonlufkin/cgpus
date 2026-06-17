@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
@@ -608,6 +609,62 @@ func probeTimeout() time.Duration {
 	return defaultProbeTimeout
 }
 
+func runProbeCommand(cmd *exec.Cmd, stdin string) ([]byte, error) {
+	stdinFile, err := os.CreateTemp("", "cgpus-ssh-stdin-*")
+	if err != nil {
+		return nil, err
+	}
+	stdinName := stdinFile.Name()
+	defer os.Remove(stdinName)
+
+	if _, err := stdinFile.WriteString(stdin); err != nil {
+		stdinFile.Close()
+		return nil, err
+	}
+	if _, err := stdinFile.Seek(0, io.SeekStart); err != nil {
+		stdinFile.Close()
+		return nil, err
+	}
+
+	stdout, err := os.CreateTemp("", "cgpus-ssh-stdout-*")
+	if err != nil {
+		stdinFile.Close()
+		return nil, err
+	}
+	stdoutName := stdout.Name()
+	defer os.Remove(stdoutName)
+
+	stderr, err := os.OpenFile(os.DevNull, os.O_WRONLY, 0)
+	if err != nil {
+		stdinFile.Close()
+		stdout.Close()
+		return nil, err
+	}
+
+	cmd.Stdin = stdinFile
+	cmd.Stdout = stdout
+	cmd.Stderr = stderr
+
+	runErr := cmd.Run()
+	stdinCloseErr := stdinFile.Close()
+	stdoutCloseErr := stdout.Close()
+	stderrCloseErr := stderr.Close()
+	if runErr != nil {
+		return nil, runErr
+	}
+	if stdinCloseErr != nil {
+		return nil, stdinCloseErr
+	}
+	if stdoutCloseErr != nil {
+		return nil, stdoutCloseErr
+	}
+	if stderrCloseErr != nil {
+		return nil, stderrCloseErr
+	}
+
+	return os.ReadFile(stdoutName)
+}
+
 func buildSSHArgs(refresh bool) []string {
 	args := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5"}
 	if refresh {
@@ -641,8 +698,7 @@ func probeHost(host string, enableCPU bool, refresh bool) hostRecord {
 	defer cancel()
 
 	cmd := commandContext(ctx, "ssh", sshArgs...)
-	cmd.Stdin = strings.NewReader(remoteProbeScript)
-	output, err := cmd.Output()
+	output, err := runProbeCommand(cmd, remoteProbeScript)
 	if ctx.Err() == context.DeadlineExceeded {
 		return hostRecord{Host: host, State: "ERR", Reason: "ssh_timeout"}
 	}
