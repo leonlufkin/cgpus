@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -34,6 +36,52 @@ func TestParseArgs(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestProbeTimeoutFromEnv(t *testing.T) {
+	t.Setenv("CGPUS_PROBE_TIMEOUT", "250ms")
+	if got := probeTimeout(); got != 250*time.Millisecond {
+		t.Fatalf("expected 250ms timeout, got %v", got)
+	}
+
+	t.Setenv("CGPUS_PROBE_TIMEOUT", "2")
+	if got := probeTimeout(); got != 2*time.Second {
+		t.Fatalf("expected 2s timeout, got %v", got)
+	}
+
+	t.Setenv("CGPUS_PROBE_TIMEOUT", "0")
+	if got := probeTimeout(); got != defaultProbeTimeout {
+		t.Fatalf("expected default timeout for zero value, got %v", got)
+	}
+
+	t.Setenv("CGPUS_PROBE_TIMEOUT", "not-a-duration")
+	if got := probeTimeout(); got != defaultProbeTimeout {
+		t.Fatalf("expected default timeout for invalid value, got %v", got)
+	}
+}
+
+func TestProbeHostTimesOut(t *testing.T) {
+	t.Setenv("CGPUS_PROBE_TIMEOUT", "100ms")
+
+	oldCommandContext := commandContext
+	commandContext = func(ctx context.Context, name string, args ...string) *exec.Cmd {
+		cmd := exec.CommandContext(ctx, os.Args[0], "-test.run=TestHelperSleepCommand", "--")
+		cmd.Env = append(os.Environ(), "CGPUS_HELPER_SLEEP=1")
+		return cmd
+	}
+	defer func() {
+		commandContext = oldCommandContext
+	}()
+
+	start := time.Now()
+	rec := probeHost("vp55", true, false)
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Fatalf("probeHost took too long after timeout: %v", elapsed)
+	}
+
+	if rec.Host != "vp55" || rec.State != "ERR" || rec.Reason != "ssh_timeout" {
+		t.Fatalf("expected vp55 ssh_timeout, got %+v", rec)
 	}
 }
 
@@ -272,4 +320,12 @@ func TestLastTagCacheRoundTrip(t *testing.T) {
 	if _, ok := loaded["host-b"]; ok {
 		t.Fatalf("expected host-b to be omitted for empty tag")
 	}
+}
+
+func TestHelperSleepCommand(t *testing.T) {
+	if os.Getenv("CGPUS_HELPER_SLEEP") != "1" {
+		return
+	}
+	time.Sleep(10 * time.Second)
+	os.Exit(0)
 }

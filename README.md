@@ -131,6 +131,12 @@ In refresh mode, SSH is invoked with multiplexing options:
 
 This avoids a full SSH handshake on each refresh iteration after the first connection.
 
+Each host probe has a local timeout of 10 seconds, so one stalled SSH session cannot block the whole snapshot. Override it with `CGPUS_PROBE_TIMEOUT`, using either a Go duration such as `20s` or a bare number of seconds:
+
+```bash
+CGPUS_PROBE_TIMEOUT=20s cgpus --cpu -f 10 my-cluster
+```
+
 ## Contributing
 
 Contributions are welcome. See `TODO.md` and docs in `docs/`.

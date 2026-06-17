@@ -2,7 +2,7 @@
 
 ## Performance
 - Add bounded worker pool in zsh backend to avoid overload on very large clusters
-- Add per-host probe timeout controls via CLI/env
+- Add CLI flag for per-host probe timeout controls
 - Add lightweight metrics for refresh latency per cycle
 
 ## Features

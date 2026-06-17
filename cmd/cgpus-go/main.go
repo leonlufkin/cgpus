@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ const (
 	yellowSpareMemGB       = 40
 	yellowPowerW           = 250
 	idleGreenDuration      = 30 * time.Minute
+	defaultProbeTimeout    = 10 * time.Second
 )
 
 const (
@@ -33,6 +35,8 @@ const (
 	colorGreen  = "\033[32m"
 	colorReset  = "\033[0m"
 )
+
+var commandContext = exec.CommandContext
 
 var remoteProbeScript = `set -o pipefail
 
@@ -569,6 +573,22 @@ func boolToInt(v bool) int {
 	return 0
 }
 
+func probeTimeout() time.Duration {
+	raw := strings.TrimSpace(os.Getenv("CGPUS_PROBE_TIMEOUT"))
+	if raw == "" {
+		return defaultProbeTimeout
+	}
+
+	if d, err := time.ParseDuration(raw); err == nil && d > 0 {
+		return d
+	}
+	if seconds, err := strconv.Atoi(raw); err == nil && seconds > 0 {
+		return time.Duration(seconds) * time.Second
+	}
+
+	return defaultProbeTimeout
+}
+
 func buildSSHArgs(refresh bool) []string {
 	args := []string{"-o", "BatchMode=yes", "-o", "ConnectTimeout=5"}
 	if refresh {
@@ -598,9 +618,15 @@ func probeHost(host string, enableCPU bool, refresh bool) hostRecord {
 	)
 	sshArgs = append(sshArgs, host, remoteCmd)
 
-	cmd := exec.Command("ssh", sshArgs...)
+	ctx, cancel := context.WithTimeout(context.Background(), probeTimeout())
+	defer cancel()
+
+	cmd := commandContext(ctx, "ssh", sshArgs...)
 	cmd.Stdin = strings.NewReader(remoteProbeScript)
 	output, err := cmd.Output()
+	if ctx.Err() == context.DeadlineExceeded {
+		return hostRecord{Host: host, State: "ERR", Reason: "ssh_timeout"}
+	}
 	if err != nil {
 		return hostRecord{Host: host, State: "ERR", Reason: "ssh_fail"}
 	}
