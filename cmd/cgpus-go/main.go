@@ -224,7 +224,7 @@ type options struct {
 	Refresh  bool
 	Capture  bool
 	Interval int
-	Group    string
+	Groups   []string
 }
 
 type historyPoint struct {
@@ -260,7 +260,7 @@ type hostRecord struct {
 }
 
 func printUsage() {
-	fmt.Println("Usage: cgpus [--cpu] [-f [INTERVAL] | --capture] GROUP")
+	fmt.Println("Usage: cgpus [--cpu] [-f [INTERVAL] | --capture] GROUP...")
 	fmt.Println("  --cpu         Show CPU load and host memory usage")
 	fmt.Println("  -f            Enable refresh mode (default: 30s interval)")
 	fmt.Println("  -f INTERVAL   Enable refresh mode with custom interval (seconds)")
@@ -273,6 +273,7 @@ func printUsage() {
 	fmt.Println("  cgpus -f 5 zyphra")
 	fmt.Println("  cgpus --cpu -f 5 zyphra")
 	fmt.Println("  cgpus --capture zyphra")
+	fmt.Println("  cgpus --cpu zyphra-horizon zyphra-vp")
 }
 
 func parseArgs(args []string) (options, error) {
@@ -298,14 +299,11 @@ func parseArgs(args []string) (options, error) {
 			if strings.HasPrefix(arg, "-") {
 				return opts, fmt.Errorf("unknown option: %s", arg)
 			}
-			if opts.Group != "" {
-				return opts, fmt.Errorf("unexpected argument: %s", arg)
-			}
-			opts.Group = arg
+			opts.Groups = append(opts.Groups, arg)
 		}
 	}
 
-	if opts.Group == "" {
+	if len(opts.Groups) == 0 {
 		return opts, errors.New("missing group")
 	}
 	if opts.Interval < 1 {
@@ -316,6 +314,27 @@ func parseArgs(args []string) (options, error) {
 	}
 
 	return opts, nil
+}
+
+func expandGroups(groups map[string][]string, selected []string) ([]string, error) {
+	nodes := []string{}
+	seen := map[string]bool{}
+
+	for _, group := range selected {
+		groupNodes, ok := groups[group]
+		if !ok {
+			return nil, fmt.Errorf("Group '%s' is not defined.", group)
+		}
+		for _, node := range groupNodes {
+			if seen[node] {
+				continue
+			}
+			seen[node] = true
+			nodes = append(nodes, node)
+		}
+	}
+
+	return nodes, nil
 }
 
 func loadGroups() (map[string][]string, error) {
@@ -1340,9 +1359,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	nodes, ok := groups[opts.Group]
-	if !ok {
-		fmt.Fprintf(os.Stderr, "Error: Group '%s' is not defined.\n", opts.Group)
+	nodes, err := expandGroups(groups, opts.Groups)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Error: %s\n", err)
 		os.Exit(1)
 	}
 

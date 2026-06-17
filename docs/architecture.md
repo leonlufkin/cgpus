@@ -11,13 +11,14 @@ Backend selection is controlled by `CGPUS_BACKEND=auto|zsh|go`.
 
 ## Data Flow
 
-1. Parse CLI args (`--cpu`, `-f`, interval, group).
+1. Parse CLI args (`--cpu`, `-f`, interval, groups).
 2. Load group definitions from `~/.ssh/ssh_key_groups.sh` (`GROUPS` map).
-3. Probe each host over SSH concurrently.
-4. Parse normalized probe record.
-5. Apply tag persistence and update per-host history.
-6. Render rows and tag summary.
-7. In refresh mode, repeat with interval pacing.
+3. Expand selected groups into an ordered, deduplicated host list.
+4. Probe each host over SSH concurrently.
+5. Parse normalized probe record.
+6. Apply tag persistence and update per-host history.
+7. Render rows and tag summary.
+8. In refresh mode, repeat with interval pacing.
 
 ## Probe Record Contract
 
@@ -34,6 +35,7 @@ Each host probe returns one tab-delimited line.
 Current reasons include:
 
 - `ssh_fail`
+- `ssh_timeout`
 - `nvidia_missing`
 - `parse_error`
 - `empty`

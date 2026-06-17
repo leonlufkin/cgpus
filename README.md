@@ -91,6 +91,7 @@ Examples:
 CGPUS_BACKEND=auto cgpus my-cluster
 CGPUS_BACKEND=go cgpus -f 5 my-cluster
 CGPUS_BACKEND=zsh cgpus --cpu my-cluster
+CGPUS_BACKEND=go cgpus --cpu my-cluster overflow-cluster
 ```
 
 Note: `cgpus-go` builds a cached binary at `.bin/cgpus-go` when sources change.
@@ -101,6 +102,12 @@ Basic:
 
 ```bash
 cgpus my-cluster
+```
+
+Multiple groups:
+
+```bash
+cgpus my-cluster overflow-cluster
 ```
 
 With CPU stats:

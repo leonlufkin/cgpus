@@ -1,6 +1,6 @@
 #!/bin/zsh
 # cgpus zsh backend
-# Usage: cgpus [--cpu] [-f [INTERVAL]] GROUP
+# Usage: cgpus [--cpu] [-f [INTERVAL]] GROUP...
 
 setopt pipefail
 setopt typeset_silent
@@ -22,7 +22,8 @@ readonly USAGE_NAME="cgpus"
 typeset -g OPT_CPU=0
 typeset -g OPT_REFRESH=0
 typeset -g OPT_INTERVAL=$DEFAULT_REFRESH_INTERVAL
-typeset -g OPT_GROUP=""
+typeset -ga OPT_GROUPS
+typeset -ga OPT_NODES
 
 typeset -gA GROUPS
 typeset -gA POWER_HISTORY
@@ -38,7 +39,7 @@ typeset -ga SSH_REFRESH_OPTS
 
 print_usage() {
   cat <<EOF_USAGE
-Usage: ${USAGE_NAME} [--cpu] [-f [INTERVAL]] GROUP
+Usage: ${USAGE_NAME} [--cpu] [-f [INTERVAL]] GROUP...
   --cpu         Show CPU load and host memory usage
   -f            Enable refresh mode (default: 30s interval)
   -f INTERVAL   Enable refresh mode with custom interval (seconds)
@@ -49,6 +50,7 @@ Examples:
   ${USAGE_NAME} -f zyphra
   ${USAGE_NAME} -f 5 zyphra
   ${USAGE_NAME} --cpu -f 5 zyphra
+  ${USAGE_NAME} --cpu zyphra-horizon zyphra-vp
 EOF_USAGE
 }
 
@@ -72,17 +74,13 @@ parse_args() {
       echo "Unknown option: $arg" >&2
       print_usage
       return 1
-    elif [[ -z "$OPT_GROUP" ]]; then
-      OPT_GROUP="$arg"
     else
-      echo "Unexpected argument: $arg" >&2
-      print_usage
-      return 1
+      OPT_GROUPS+=("$arg")
     fi
     i=$((i + 1))
   done
 
-  if [[ -z "$OPT_GROUP" ]]; then
+  if [[ ${#OPT_GROUPS[@]} -eq 0 ]]; then
     print_usage
     return 1
   fi
@@ -92,6 +90,31 @@ parse_args() {
     return 1
   fi
 
+  return 0
+}
+
+expand_group_nodes() {
+  local -A seen
+  local -a nodes group_nodes
+  local group host
+
+  for group in "${OPT_GROUPS[@]}"; do
+    if [[ -z "${GROUPS[$group]:-}" ]]; then
+      echo "Group '$group' is not defined." >&2
+      return 1
+    fi
+
+    group_nodes=(${(s: :)GROUPS[$group]})
+    for host in "${group_nodes[@]}"; do
+      [[ -z "$host" ]] && continue
+      if [[ -z "${seen[$host]:-}" ]]; then
+        seen[$host]=1
+        nodes+=("$host")
+      fi
+    done
+  done
+
+  OPT_NODES=("${nodes[@]}")
   return 0
 }
 
@@ -123,10 +146,7 @@ load_groups() {
     GROUPS[$key]="$hosts"
   done <<< "$groups_dump"
 
-  if [[ -z "${GROUPS[$OPT_GROUP]:-}" ]]; then
-    echo "Group '$OPT_GROUP' is not defined." >&2
-    return 1
-  fi
+  expand_group_nodes || return 1
 
   return 0
 }
@@ -195,7 +215,7 @@ calculate_sparkline_size() {
   # so it reflects live resizes and ignores stale $COLUMNS).
   local term_width=""
   if [[ -r /dev/tty ]]; then
-    term_width=$(stty size </dev/tty 2>/dev/null | awk '{print $2}')
+    term_width=$({ stty size </dev/tty } 2>/dev/null | awk '{print $2}')
   fi
   if [[ -z "$term_width" || "$term_width" -le 0 ]]; then
     term_width=${COLUMNS:-$(tput cols 2>/dev/null || echo 120)}
@@ -623,18 +643,12 @@ REMOTE_PROBE
 }
 
 render_snapshot() {
-  local group="$1"
-  local enable_history="$2"
-  local max_history="$3"
-  local enable_cpu="$4"
-
-  if [[ -z "${GROUPS[$group]:-}" ]]; then
-    echo "Group '$group' is not defined." >&2
-    return 1
-  fi
+  local enable_history="$1"
+  local max_history="$2"
+  local enable_cpu="$3"
 
   local -a nodes
-  nodes=(${(s: :)GROUPS[$group]})
+  nodes=("${OPT_NODES[@]}")
 
   local tmp_dir
   tmp_dir=$(mktemp -d -t cgpus_results)
@@ -857,7 +871,7 @@ render_snapshot() {
 run_once() {
   local sparkline_size
   sparkline_size="$(calculate_sparkline_size "$OPT_CPU")"
-  render_snapshot "$OPT_GROUP" 0 "$sparkline_size" "$OPT_CPU"
+  render_snapshot 0 "$sparkline_size" "$OPT_CPU"
 }
 
 run_refresh() {
@@ -886,7 +900,7 @@ run_refresh() {
 
     sparkline_size="$(calculate_sparkline_size "$OPT_CPU")"
 
-    snapshot="$(render_snapshot "$OPT_GROUP" 1 "$sparkline_size" "$OPT_CPU")"
+    snapshot="$(render_snapshot 1 "$sparkline_size" "$OPT_CPU")"
 
     printf '\033[2J\033[H'
     print -r -- "$snapshot"

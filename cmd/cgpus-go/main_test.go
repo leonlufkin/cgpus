@@ -21,6 +21,7 @@ func TestParseArgs(t *testing.T) {
 		{name: "refresh default interval", args: []string{"-f", "cluster"}},
 		{name: "capture", args: []string{"--capture", "cluster"}},
 		{name: "capture with cpu", args: []string{"--capture", "--cpu", "cluster"}},
+		{name: "multiple groups", args: []string{"--cpu", "cluster-a", "cluster-b"}},
 		{name: "capture and refresh conflict", args: []string{"--capture", "-f", "cluster"}, wantErr: true},
 		{name: "missing group", args: []string{"--cpu"}, wantErr: true},
 		{name: "unknown flag", args: []string{"--wat", "cluster"}, wantErr: true},
@@ -36,6 +37,46 @@ func TestParseArgs(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 		})
+	}
+}
+
+func TestParseArgsMultipleGroups(t *testing.T) {
+	opts, err := parseArgs([]string{"--cpu", "-f", "5", "cluster-a", "cluster-b"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !opts.CPU || !opts.Refresh || opts.Interval != 5 {
+		t.Fatalf("unexpected options: %+v", opts)
+	}
+	if got := strings.Join(opts.Groups, ","); got != "cluster-a,cluster-b" {
+		t.Fatalf("unexpected groups: %q", got)
+	}
+}
+
+func TestExpandGroupsDedupesInOrder(t *testing.T) {
+	groups := map[string][]string{
+		"a": {"h1", "h2", "h3"},
+		"b": {"h2", "h4"},
+		"c": {"h1", "h5"},
+	}
+
+	nodes, err := expandGroups(groups, []string{"a", "b", "c"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if got := strings.Join(nodes, ","); got != "h1,h2,h3,h4,h5" {
+		t.Fatalf("unexpected nodes: %q", got)
+	}
+}
+
+func TestExpandGroupsMissingGroup(t *testing.T) {
+	_, err := expandGroups(map[string][]string{"a": {"h1"}}, []string{"a", "missing"})
+	if err == nil {
+		t.Fatalf("expected missing group error")
+	}
+	if !strings.Contains(err.Error(), "Group 'missing' is not defined.") {
+		t.Fatalf("unexpected error: %v", err)
 	}
 }
 
