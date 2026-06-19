@@ -47,6 +47,7 @@ Tags are assigned only when all observed GPU processes match exactly one rule:
 - `*`: owner is `leon`
 - `†`: owner is `kamesh`
 - `‡`: owner is `cutter`
+- `n`: owner is `nick`
 - `RL`: process name contains `ray::WorkerDict` or owner is `pritish`
 - `CM`: command line contains `cmoe`
 - `AU`: command line contains `lisan.al_gaib` or `zonos`

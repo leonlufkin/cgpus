@@ -135,6 +135,7 @@ if [[ -n "$process_data" ]]; then
   check_bi=1
   check_kk=1
   check_cutter=1
+  check_nick=1
   num_processes=0
 
   while IFS=',' read -r pid proc_name; do
@@ -160,10 +161,11 @@ if [[ -n "$process_data" ]]; then
     [[ "$cmd_line" != *"AY2latent_bci"* ]] && check_bi=0
     [[ "$owner" != "kamesh" ]] && check_kk=0
     [[ "$owner" != "cutter" ]] && check_cutter=0
+    [[ "$owner" != "nick" ]] && check_nick=0
   done <<< "$process_data"
 
   if [[ $num_processes -gt 0 ]]; then
-    tag_count=$((check_leon + check_ray + check_cmoe + check_au + check_da + check_ar + check_bi + check_kk + check_cutter))
+    tag_count=$((check_leon + check_ray + check_cmoe + check_au + check_da + check_ar + check_bi + check_kk + check_cutter + check_nick))
     if [[ $tag_count -eq 1 ]]; then
       [[ $check_leon -eq 1 ]] && process_tag="*"
       [[ $check_ray -eq 1 ]] && process_tag="RL"
@@ -174,6 +176,7 @@ if [[ -n "$process_data" ]]; then
       [[ $check_bi -eq 1 ]] && process_tag="BI"
       [[ $check_kk -eq 1 ]] && process_tag="†"
       [[ $check_cutter -eq 1 ]] && process_tag="‡"
+      [[ $check_nick -eq 1 ]] && process_tag="n"
     elif [[ $tag_count -gt 1 ]]; then
       process_tag="MIXED"
     else
@@ -496,7 +499,7 @@ func saveLastTagCache(tags map[string]string) error {
 
 func isValidCachedTag(tag string) bool {
 	switch tag {
-	case "*", "†", "‡", "RL", "CM", "AU", "DA", "AR", "BI":
+	case "*", "†", "‡", "n", "RL", "CM", "AU", "DA", "AR", "BI":
 		return true
 	default:
 		return false
@@ -1055,7 +1058,7 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 	}
 
 	tagCounts := map[string]int{}
-	tagOrder := []string{"*", "†", "‡", "RL", "CM", "AU", "DA", "AR", "BI"}
+	tagOrder := []string{"*", "†", "‡", "n", "RL", "CM", "AU", "DA", "AR", "BI"}
 
 	now := time.Now()
 	var out strings.Builder

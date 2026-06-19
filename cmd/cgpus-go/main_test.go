@@ -364,6 +364,7 @@ func TestLastTagCacheRoundTrip(t *testing.T) {
 		"host-c": "†",
 		"host-d": "‡",
 		"host-e": "BI",
+		"host-f": "n",
 	}
 	if err := saveLastTagCache(tags); err != nil {
 		t.Fatalf("saveLastTagCache failed: %v", err)
@@ -389,6 +390,9 @@ func TestLastTagCacheRoundTrip(t *testing.T) {
 	}
 	if loaded["host-e"] != "BI" {
 		t.Fatalf("expected host-e BI, got %q", loaded["host-e"])
+	}
+	if loaded["host-f"] != "n" {
+		t.Fatalf("expected host-f n, got %q", loaded["host-f"])
 	}
 	if _, ok := loaded["host-b"]; ok {
 		t.Fatalf("expected host-b to be omitted for empty tag")
