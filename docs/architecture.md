@@ -52,6 +52,7 @@ Tags are assigned only when all observed GPU processes match exactly one rule:
 - `AU`: command line contains `lisan.al_gaib` or `zonos`
 - `DA`: owner is `xiao` or command line contains `dataInfra`
 - `AR`: command line contains `pretrain_gpt`
+- `BI`: command line contains `AY2latent_bci`
 
 If multiple tags match all processes, tag is `MIXED`.
 If no tags match all processes, tag is `NONE`.

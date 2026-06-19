@@ -132,6 +132,7 @@ if [[ -n "$process_data" ]]; then
   check_au=1
   check_da=1
   check_ar=1
+  check_bi=1
   check_kk=1
   check_cutter=1
   num_processes=0
@@ -156,12 +157,13 @@ if [[ -n "$process_data" ]]; then
     [[ "$cmd_line" != *"lisan.al_gaib"* && "$cmd_line" != *"zonos"* ]] && check_au=0
     [[ "$owner" != "xiao" && "$cmd_line" != *"dataInfra"* ]] && check_da=0
     [[ "$cmd_line" != *"pretrain_gpt"* ]] && check_ar=0
+    [[ "$cmd_line" != *"AY2latent_bci"* ]] && check_bi=0
     [[ "$owner" != "kamesh" ]] && check_kk=0
     [[ "$owner" != "cutter" ]] && check_cutter=0
   done <<< "$process_data"
 
   if [[ $num_processes -gt 0 ]]; then
-    tag_count=$((check_leon + check_ray + check_cmoe + check_au + check_da + check_ar + check_kk + check_cutter))
+    tag_count=$((check_leon + check_ray + check_cmoe + check_au + check_da + check_ar + check_bi + check_kk + check_cutter))
     if [[ $tag_count -eq 1 ]]; then
       [[ $check_leon -eq 1 ]] && process_tag="*"
       [[ $check_ray -eq 1 ]] && process_tag="RL"
@@ -169,6 +171,7 @@ if [[ -n "$process_data" ]]; then
       [[ $check_au -eq 1 ]] && process_tag="AU"
       [[ $check_da -eq 1 ]] && process_tag="DA"
       [[ $check_ar -eq 1 ]] && process_tag="AR"
+      [[ $check_bi -eq 1 ]] && process_tag="BI"
       [[ $check_kk -eq 1 ]] && process_tag="†"
       [[ $check_cutter -eq 1 ]] && process_tag="‡"
     elif [[ $tag_count -gt 1 ]]; then
@@ -493,7 +496,7 @@ func saveLastTagCache(tags map[string]string) error {
 
 func isValidCachedTag(tag string) bool {
 	switch tag {
-	case "*", "†", "‡", "RL", "CM", "AU", "DA", "AR":
+	case "*", "†", "‡", "RL", "CM", "AU", "DA", "AR", "BI":
 		return true
 	default:
 		return false
@@ -1052,7 +1055,7 @@ func renderSnapshot(opts options, nodes []string, state *runtimeState, enableHis
 	}
 
 	tagCounts := map[string]int{}
-	tagOrder := []string{"*", "†", "‡", "RL", "CM", "AU", "DA", "AR"}
+	tagOrder := []string{"*", "†", "‡", "RL", "CM", "AU", "DA", "AR", "BI"}
 
 	now := time.Now()
 	var out strings.Builder
