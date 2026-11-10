@@ -77,6 +77,25 @@ typeset -A GROUPS=(
 )
 ```
 
+### Voltage Park groups
+
+The VP group definitions in `examples/zyphra-vp-groups.sh` provide:
+
+- `zyphra-vp`: the 50 nodes that responded to SSH on November 10, 2026.
+- `zyphra-vp-all`: the full `vp1`–`vp127` inventory, including unreachable nodes.
+
+Append these definitions to your existing `~/.ssh/ssh_key_groups.sh` (after
+its associative-array declaration) to install or override the VP groups:
+
+```bash
+cat examples/zyphra-vp-groups.sh >> ~/.ssh/ssh_key_groups.sh
+cgpus zyphra-vp
+cgpus zyphra-vp-all
+```
+
+These are explicit host lists, not automatic discovery. SSH reachability does
+not imply healthy GPUs or permission to schedule jobs on a node.
+
 ## Backend Selection
 
 Select backend with `CGPUS_BACKEND`:
